@@ -2,26 +2,53 @@
 .env.*
 !.env.example
 
+# Real / generated data
 data/bronze/*
 data/silver/*
 data/gold/*
+data/**
+!data/.gitkeep
 
+# Models
 models/production/*
 models/experiments/*
+models/metadata/*
+models/**
+!models/.gitkeep
 
+# Python
+.venv/
+venv/
+env/
 __pycache__/
 *.py[cod]
-
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 .ipynb_checkpoints/
+*.egg-info/
 
+# Node
 node_modules/
+dist/
+build/
+coverage/
 frontend/dist/
 frontend/build/
+frontend/.vite/
 
+# IDE
 .vscode/
 .idea/
+
+# OS
 .DS_Store
 Thumbs.db
+
+# Local/generated outputs
+/$out/
+/$root/
+/status_source_inventory.json
+/_probe_common_population.py
+logs/
+*.log

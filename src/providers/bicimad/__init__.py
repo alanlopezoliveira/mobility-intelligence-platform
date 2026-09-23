@@ -1,0 +1,1 @@
+"""BiciMAD provider implementation."""

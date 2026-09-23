@@ -1,0 +1,115 @@
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 2rem;
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.eyebrow {
+  margin: 0;
+  text-transform: uppercase;
+  font-size: 0.75rem;
+  letter-spacing: 0.12em;
+  color: #64748b;
+}
+
+.language-switch {
+  display: inline-flex;
+  gap: 0.5rem;
+  background: #f1f5f9;
+  padding: 0.35rem 0.5rem;
+  border-radius: 999px;
+}
+
+.language-switch .active {
+  background: #0f172a;
+  color: white;
+  padding: 0.25rem 0.5rem;
+  border-radius: 999px;
+}
+
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(180px, 1fr));
+  gap: 1rem;
+}
+
+.kpi-card {
+  display: flex;
+  flex-direction: column;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 1rem;
+  box-shadow: 0 10px 25px rgba(15, 23, 42, 0.04);
+}
+
+.kpi-card strong {
+  font-size: 1.6rem;
+  margin-top: 0.5rem;
+}
+
+.kpi-card.primary { border-left: 4px solid #2563eb; }
+.kpi-card.warning { border-left: 4px solid #f59e0b; }
+.kpi-card.success { border-left: 4px solid #10b981; }
+.kpi-card.neutral { border-left: 4px solid #64748b; }
+
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 1rem;
+}
+
+.panel {
+  background: white;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 1rem;
+}
+
+.map-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 240px;
+  background: linear-gradient(135deg, #eff6ff, #dbeafe);
+  border-radius: 12px;
+  color: #0f172a;
+  font-weight: 600;
+}
+
+.alerts-panel ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.table-panel table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.table-panel th,
+.table-panel td {
+  padding: 0.75rem 0.5rem;
+  border-bottom: 1px solid #e2e8f0;
+  text-align: left;
+}
+
+.risk.high { color: #b91c1c; font-weight: 700; }
+.risk.medium { color: #b45309; font-weight: 700; }
+.risk.critical { color: #7f1d1d; font-weight: 700; }
+

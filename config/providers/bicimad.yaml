@@ -1,0 +1,108 @@
+provider: bicimad
+name: BiciMAD
+source_name: bicimad_historical_trips
+catalog_url: https://datos.gob.es/es/catalogo/l01280796-historicos-de-bicimad-2017-20231
+source_license_or_terms: "Third-party open-data terms apply; verify the specific provider terms before reuse."
+attribution: "Mobility Intelligence Platform uses the official BiciMAD historical open data distributions."
+temporal_coverage: "2017-2023"
+spatial_coverage: "Madrid, Spain"
+station_master:
+  provider: bicimad
+  dataset_id: 208327-0-transporte-bicicletas-bicimad
+  catalog_url: https://datos.madrid.es/dataset/208327-0-transporte-bicicletas-bicimad
+  direct_url: https://datos.madrid.es/dataset/208327-0-transporte-bicicletas-bicimad/resource/208327-2-transporte-bicicletas-bicimad/download/208327-2-transporte-bicicletas-bicimad.csv
+  expected_extension: .csv
+  expected_content_type: text/csv
+  source_name: bicimad_station_master
+historical:
+  - source_name: bicimad_historical_2017
+    provider: bicimad
+    dataset_id: 900034-0-bicimad-viajes-estaciones
+    distribution_id: 2017
+    year: 2017
+    direct_url: https://media.emtmadrid.es/-HoGTStPZeC
+    catalog_url: https://datos.gob.es/es/catalogo/l01280796-historicos-de-bicimad-2017-20231
+    expected_extension: .zip
+    expected_content_type: application/zip
+    source_license_or_terms: "Third-party open-data terms apply; verify the specific provider terms before reuse."
+    attribution: "Official BiciMAD historical open-data distribution for 2017."
+    temporal_coverage: "2017"
+    spatial_coverage: "Madrid, Spain"
+  - source_name: bicimad_historical_2018
+    provider: bicimad
+    dataset_id: 900034-0-bicimad-viajes-estaciones
+    distribution_id: 2018
+    year: 2018
+    direct_url: https://media.emtmadrid.es/-9iZNUjrjri
+    catalog_url: https://datos.gob.es/es/catalogo/l01280796-historicos-de-bicimad-2017-20231
+    expected_extension: .zip
+    expected_content_type: application/zip
+    source_license_or_terms: "Third-party open-data terms apply; verify the specific provider terms before reuse."
+    attribution: "Official BiciMAD historical open-data distribution for 2018."
+    temporal_coverage: "2018"
+    spatial_coverage: "Madrid, Spain"
+  - source_name: bicimad_historical_2019
+    provider: bicimad
+    dataset_id: 900034-0-bicimad-viajes-estaciones
+    distribution_id: 2019
+    year: 2019
+    direct_url: https://media.emtmadrid.es/-WNgfSj2ZvC
+    catalog_url: https://datos.gob.es/es/catalogo/l01280796-historicos-de-bicimad-2017-20231
+    expected_extension: .zip
+    expected_content_type: application/zip
+    source_license_or_terms: "Third-party open-data terms apply; verify the specific provider terms before reuse."
+    attribution: "Official BiciMAD historical open-data distribution for 2019."
+    temporal_coverage: "2019"
+    spatial_coverage: "Madrid, Spain"
+  - source_name: bicimad_historical_2020
+    provider: bicimad
+    dataset_id: 900034-0-bicimad-viajes-estaciones
+    distribution_id: 2020
+    year: 2020
+    direct_url: https://media.emtmadrid.es/-rkuBymuFJX
+    catalog_url: https://datos.gob.es/es/catalogo/l01280796-historicos-de-bicimad-2017-20231
+    expected_extension: .zip
+    expected_content_type: application/zip
+    source_license_or_terms: "Third-party open-data terms apply; verify the specific provider terms before reuse."
+    attribution: "Official BiciMAD historical open-data distribution for 2020."
+    temporal_coverage: "2020"
+    spatial_coverage: "Madrid, Spain"
+  - source_name: bicimad_historical_2021
+    provider: bicimad
+    dataset_id: 900034-0-bicimad-viajes-estaciones
+    distribution_id: 2021
+    year: 2021
+    direct_url: https://media.emtmadrid.es/-BRk4rTaAdV
+    catalog_url: https://datos.gob.es/es/catalogo/l01280796-historicos-de-bicimad-2017-20231
+    expected_extension: .zip
+    expected_content_type: application/zip
+    source_license_or_terms: "Third-party open-data terms apply; verify the specific provider terms before reuse."
+    attribution: "Official BiciMAD historical open-data distribution for 2021."
+    temporal_coverage: "2021"
+    spatial_coverage: "Madrid, Spain"
+  - source_name: bicimad_historical_2022
+    provider: bicimad
+    dataset_id: 900034-0-bicimad-viajes-estaciones
+    distribution_id: 2022
+    year: 2022
+    direct_url: https://media.emtmadrid.es/-uHaW6iZkhG
+    catalog_url: https://datos.gob.es/es/catalogo/l01280796-historicos-de-bicimad-2017-20231
+    expected_extension: .zip
+    expected_content_type: application/zip
+    source_license_or_terms: "Third-party open-data terms apply; verify the specific provider terms before reuse."
+    attribution: "Official BiciMAD historical open-data distribution for 2022."
+    temporal_coverage: "2022"
+    spatial_coverage: "Madrid, Spain"
+  - source_name: bicimad_historical_2023
+    provider: bicimad
+    dataset_id: 900034-0-bicimad-viajes-estaciones
+    distribution_id: 2023
+    year: 2023
+    direct_url: https://media.emtmadrid.es/-9Nii5DXo4x
+    catalog_url: https://datos.gob.es/es/catalogo/l01280796-historicos-de-bicimad-2017-20231
+    expected_extension: .zip
+    expected_content_type: application/zip
+    source_license_or_terms: "Third-party open-data terms apply; verify the specific provider terms before reuse."
+    attribution: "Official BiciMAD historical open-data distribution for 2023."
+    temporal_coverage: "2023"
+    spatial_coverage: "Madrid, Spain"
