@@ -16,9 +16,16 @@ from geoalchemy2.shape import from_shape
 from shapely.geometry import Point
 
 from src.config.settings import load_provider_config
+from src.data_quality.canonical_gold import normalize_station_id
 from src.db.database import SessionLocal
 from src.db.models import Station
 from src.ingestion.bicimad import ParseStats, aggregate_trips, iter_historical_trips, persist_demand
+from src.ml.cli_readiness import (
+    FORECASTING_STATE_DATA_NOT_PREPARED,
+    FORECASTING_STATE_NOT_READY,
+    FORECASTING_STATE_READY,
+    inspect_forecasting_state,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REQUEST_TIMEOUT = 30
@@ -33,7 +40,7 @@ def _normalize_column_name(name: object) -> str:
 
 
 def _coerce_numeric(series: pd.Series) -> pd.Series:
-    numeric = series.map(lambda value: str(value).replace('.', '').replace(',', '.').strip() if isinstance(value, str) else value)
+    numeric = series.map(lambda value: (value.replace('.', '').replace(',', '.') if ',' in value else value).strip() if isinstance(value, str) else value)
     numeric = pd.to_numeric(numeric, errors='coerce')
     return numeric
 
@@ -54,6 +61,23 @@ def _validate_historical_demand(demand: pd.DataFrame) -> None:
         raise ValueError('Historical demand contains duplicate station/time observations')
 
 
+def _canonicalize_historical_demand(demand: pd.DataFrame) -> pd.DataFrame:
+    """Normalize the station/time key and sum rows that collapse to one canonical key."""
+    working = demand.copy()
+    working['station_id'] = working['station_id'].map(normalize_station_id)
+    working['timestamp'] = pd.to_datetime(working['timestamp'], errors='coerce', utc=True)
+    if working['station_id'].eq('').any() or working['timestamp'].isna().any():
+        raise ValueError('Historical demand contains invalid canonical station/time keys')
+    canonical = (
+        working.groupby(['timestamp', 'station_id'], as_index=False, sort=True)
+        .agg(departures=('departures', 'sum'), arrivals=('arrivals', 'sum'), source_year=('source_year', 'min'))
+    )
+    canonical['total_activity'] = canonical['departures'] + canonical['arrivals']
+    canonical['net_flow'] = canonical['arrivals'] - canonical['departures']
+    canonical['demand'] = canonical['departures']
+    return canonical.sort_values(['timestamp', 'station_id']).reset_index(drop=True)
+
+
 def _publish_historical_outputs(stage_dir: Path, silver_dir: Path, gold_dir: Path) -> None:
     (stage_dir / 'historical_trip_observations.csv').replace(silver_dir / 'historical_trip_observations.csv')
     (stage_dir / 'station_demand_hourly.csv').replace(gold_dir / 'station_demand_hourly.csv')
@@ -64,10 +88,14 @@ def _persist_stations(normalized: pd.DataFrame, source_name: str) -> int:
         return 0
 
     persisted = 0
+    provider = load_provider_config()
+    provider_id, network_id = provider.provider.lower(), provider.network_id
     with SessionLocal.begin() as session:
         for row in normalized.to_dict(orient='records'):
             station_id = str(row['station_id'])
-            station = session.get(Station, station_id) or Station(station_id=station_id, source_name=source_name)
+            station = session.get(Station, (provider_id, network_id, station_id)) or Station(
+                station_id=station_id, provider_id=provider_id, network_id=network_id, source_name=source_name
+            )
             station.name = str(row.get('name') or '')
             station.address = str(row.get('address') or '')
             station.capacity = int(row['capacity']) if pd.notna(row.get('capacity')) else None
@@ -133,18 +161,18 @@ def prepare_data() -> dict[str, object]:
     normalized = raw_df.copy()
     normalized.columns = [_normalize_column_name(column) for column in normalized.columns]
 
-    station_id_candidates = ['objectid', 'station_id', 'number', 'id']
+    station_id_candidates = ['station_id', 'number', 'id']
     station_id_column = next((candidate for candidate in station_id_candidates if candidate in normalized.columns), None)
     if station_id_column is not None:
         normalized['station_id'] = normalized[station_id_column].astype(str)
     else:
-        normalized['station_id'] = normalized.index.astype(str)
+        raise ValueError('Station master lacks a service station ID; GIS object IDs are not a validated crosswalk')
 
     capacity_candidates = ['totalbase', 'totalbases', 'capacity']
     capacity_column = next((candidate for candidate in capacity_candidates if candidate in normalized.columns), None)
     normalized['capacity'] = _coerce_numeric(normalized[capacity_column]) if capacity_column else pd.NA
 
-    available_candidates = ['noavailable', 'available_bikes', 'availablebikes', 'bikes_available', 'free_bikes']
+    available_candidates = ['dock_bikes', 'dockbikes', 'available_bikes', 'availablebikes', 'bikes_available', 'free_bikes']
     available_column = next((candidate for candidate in available_candidates if candidate in normalized.columns), None)
     normalized['available_bikes'] = _coerce_numeric(normalized[available_column]) if available_column else pd.NA
 
@@ -191,8 +219,9 @@ def prepare_data() -> dict[str, object]:
     normalized[silver_columns].to_csv(silver_path, index=False)
 
     gold = normalized[["station_id", "capacity", "available_bikes", "latitude", "longitude"]].copy()
-    gold['station_score'] = gold['capacity'].fillna(0) - gold['available_bikes'].fillna(0)
-    gold = gold.dropna(subset=['capacity', 'available_bikes']).copy()
+    # Preserve station metadata when a static master has no inventory reading.
+    # Unknown inventory must stay unknown, not become zero bikes or a lost station.
+    gold['station_score'] = gold['capacity'] - gold['available_bikes']
     gold['station_score'] = gold['station_score'].clip(lower=0)
     gold_path = gold_dir / 'station_features.csv'
     gold.to_csv(gold_path, index=False)
@@ -201,6 +230,8 @@ def prepare_data() -> dict[str, object]:
     try:
         trips, inspection = iter_historical_trips()
         demand, demand_quality = aggregate_trips(trips)
+        precanonical_demand_count = len(demand)
+        demand = _canonicalize_historical_demand(demand)
         _validate_historical_demand(demand)
         demand_path = gold_dir / 'station_demand_hourly.csv'
         silver_trips_path = silver_dir / 'historical_trip_observations.csv'
@@ -235,6 +266,7 @@ def prepare_data() -> dict[str, object]:
         'destination': str(gold_path),
         'persisted_rows': persisted_rows,
         'demand_observations': len(demand),
+        'precanonical_demand_observations': precanonical_demand_count,
         'demand_persisted_rows': demand_persisted,
         'trip_count': demand_quality['trip_count'],
         'duplicate_trip_count': demand_quality['duplicate_trip_count'],
@@ -272,52 +304,32 @@ def prepare_data() -> dict[str, object]:
 
 
 def train() -> dict[str, object]:
-    gold_path = REPO_ROOT / 'data' / 'gold' / 'station_features.csv'
-    if not gold_path.exists():
-        prepare_data()
-
-    gold = pd.read_csv(gold_path)
-    model_dir = REPO_ROOT / 'models' / 'production'
-    metadata_dir = REPO_ROOT / 'models' / 'metadata'
-    _ensure_directory(model_dir)
-    _ensure_directory(metadata_dir)
-    model_path = model_dir / 'bicimad_baseline.joblib'
-    if model_path.exists():
-        model_path.unlink()
-
-    metadata: dict[str, object] = {
-        'model_name': 'bicimad_forecaster',
-        'model_version': 'unvalidated-no-temporal-target',
-        'status': 'blocked',
-        'reason': 'station master data has no timestamped demand target; the former snapshot score was target leakage',
-        'feature_definition': [],
-        'train_period': None,
-        'validation_period': None,
-        'test_period': None,
-        'metrics': {'status': 'not_evaluable', 'rows': len(gold)},
-    }
-    (metadata_dir / 'model_metadata.json').write_text(json.dumps(metadata, indent=2), encoding='utf-8')
-    print('train: blocked because no timestamped demand target is available; no model artifact was created')
-    return {'status': 'blocked', 'reason': metadata['reason']}
+    state = inspect_forecasting_state(REPO_ROOT)
+    result: dict[str, object] = {'status': state.status, 'reason': state.reason, **state.details}
+    if state.status == FORECASTING_STATE_READY:
+        result['training'] = 'deferred'
+        result['training_reason'] = (
+            'No experiment training operation is authorized by the current benchmark state; '
+            'this command does not select or promote a model.'
+        )
+    print(f"train: {state.status}: {state.reason}")
+    if state.status == FORECASTING_STATE_NOT_READY:
+        print(f"train: blockers={state.details.get('problems', [])}")
+    return result
 
 
 def evaluate() -> dict[str, object]:
-    gold_path = REPO_ROOT / 'data' / 'gold' / 'station_features.csv'
-    if not gold_path.exists():
-        prepare_data()
-
-    gold = pd.read_csv(gold_path)
-    metadata_dir = REPO_ROOT / 'models' / 'metadata'
-    _ensure_directory(metadata_dir)
-    metrics: dict[str, object] = {
-        'status': 'not_evaluable',
-        'reason': 'no timestamped demand observations; chronological train/validation/test evaluation is impossible',
-        'original_snapshot_mae': 'invalid_due_to_target_leakage',
-        'original_snapshot_r2': 'invalid_due_to_target_leakage',
-        'rows_inspected': len(gold),
-    }
-    (metadata_dir / 'evaluation_metrics.json').write_text(json.dumps(metrics, indent=2), encoding='utf-8')
-    print('evaluate: not evaluable; no timestamped demand target is present')
+    state = inspect_forecasting_state(REPO_ROOT)
+    metrics: dict[str, object] = {'status': state.status, 'reason': state.reason, **state.details}
+    if state.status == FORECASTING_STATE_READY:
+        metrics.update({
+            'evaluation_status': 'NO_PRODUCTION_MODEL',
+            'reason': 'Forecasting contract artifacts are valid, but no production model exists to evaluate.',
+            'target': 'target_departures',
+            'horizons_minutes': [60, 120],
+            'metrics': ['MAE', 'RMSE', 'R²', 'n_predictions', 'coverage'],
+        })
+    print(f"evaluate: {metrics.get('evaluation_status', state.status)}: {metrics['reason']}")
     return metrics
 
 
@@ -333,9 +345,16 @@ def main() -> None:
     if args.command == 'prepare-data':
         prepare_data()
     elif args.command == 'train':
-        train()
+        result = train()
+        if result['status'] != FORECASTING_STATE_READY or result.get('training') == 'deferred':
+            raise SystemExit(2)
     elif args.command == 'evaluate':
-        evaluate()
+        result = evaluate()
+        if (
+            result['status'] in {FORECASTING_STATE_DATA_NOT_PREPARED, FORECASTING_STATE_NOT_READY}
+            or result.get('evaluation_status') == 'NO_PRODUCTION_MODEL'
+        ):
+            raise SystemExit(2)
 
 
 if __name__ == '__main__':

@@ -1,0 +1,144 @@
+{
+  "reviewed_at": "2026-09-27",
+  "scope": "2022 rebuilt research pipeline; legacy databases and historical artifacts are not certified as repaired",
+  "findings": [
+    {
+      "id": "A01",
+      "status": "Partial",
+      "detail": "Shared parsing now separates docked bikes, free docks and service flags. Historical inventory products and the legacy database have not all been rebuilt.",
+      "evidence": "src/ingestion/snapshots.py; src/ingestion/bicimad.py; docs/rebuilt-project.md"
+    },
+    {
+      "id": "A02",
+      "status": "Resolved in rebuild",
+      "detail": "The 2022 aggregate counts arrivals using their own end timestamps; invalid arrivals do not discard valid departures. Legacy rounded timestamps remain outside this reference run.",
+      "evidence": "src/ingestion/rebuild.py; tests/unit/test_rebuilt_pipeline.py"
+    },
+    {
+      "id": "A03",
+      "status": "Partial",
+      "detail": "The legacy duration conversion was corrected to seconds. Earlier derived datasets were not regenerated; the rebuilt 2022 pipeline uses explicit end timestamps.",
+      "evidence": "src/ingestion/bicimad.py; docs/rebuilt-project.md"
+    },
+    {
+      "id": "A04",
+      "status": "Partial",
+      "detail": "The shared snapshot parser retains all source timestamps and flags, and the historical audit reads complete files. A complete production inventory time-series database remains outside this rebuild.",
+      "evidence": "src/ingestion/snapshots.py; scripts/build_audit_report.py; docs/rebuilt-project.md"
+    },
+    {
+      "id": "A05",
+      "status": "Open",
+      "detail": "Models predict recorded departures. Inventory forecasts and model-based empty/full alerts remain unavailable.",
+      "evidence": "docs/rebuilt-project.md; src/ml/rebuilt.py"
+    },
+    {
+      "id": "A06",
+      "status": "Resolved in rebuild",
+      "detail": "The current feature pipeline was trained and evaluated again. Candidate caches record code/data fingerprints, parameters and package versions; old scores remain historical.",
+      "evidence": "src/ml/model_comparison.py; tests/unit/test_model_comparison.py"
+    },
+    {
+      "id": "A07",
+      "status": "Partial",
+      "detail": "Exact UTC lags use completed hours with explicit issue and target times. Actual live collection latency has not been measured or validated.",
+      "evidence": "src/ml/rebuilt.py; docs/rebuilt-project.md"
+    },
+    {
+      "id": "A08",
+      "status": "Resolved in rebuild",
+      "detail": "All candidates and both selected models are serialized with contracts. Reloaded validation predictions match within 1e-12; no tree importance is claimed for the selected linear models.",
+      "evidence": "src/ml/model_comparison.py; tests/unit/test_model_comparison.py"
+    },
+    {
+      "id": "A09",
+      "status": "Partial",
+      "detail": "The model cohort requires year-round source IDs and stable coordinates. Network coverage and zero-fill assumptions are explicit; physical station continuity and operating hours remain unproven.",
+      "evidence": "scripts/rebuild_project.py; docs/rebuilt-project.md"
+    },
+    {
+      "id": "A10",
+      "status": "Partial",
+      "detail": "Unvalidated GIS IDs are no longer silently accepted as service IDs. The rebuild uses trip-origin coordinates, but a verified cross-year station identity crosswalk is still missing.",
+      "evidence": "src/ingestion/bicimad.py; src/ingestion/rebuild.py"
+    },
+    {
+      "id": "A11",
+      "status": "Partial",
+      "detail": "Seven trained model families and three baselines now share the same chronological evaluation rows. Rolling-origin, cold-start and prospective validation remain outstanding; the historical test period has been inspected before.",
+      "evidence": "docs/model-comparison.md; src/ml/model_comparison.py"
+    },
+    {
+      "id": "A12",
+      "status": "Resolved in rebuild",
+      "detail": "Last completed hour, target-aligned yesterday and target-aligned last-week baselines are named explicitly and evaluated on identical rows.",
+      "evidence": "src/ml/rebuilt.py; src/ml/model_comparison.py"
+    },
+    {
+      "id": "A13",
+      "status": "Partial",
+      "detail": "Installed versions are pinned in constraints-rebuilt.txt and recorded in model metadata. Cross-platform clean-environment reproducibility is not yet certified; existing deprecation warnings remain.",
+      "evidence": "constraints-rebuilt.txt; tests/unit/test_model_comparison.py"
+    },
+    {
+      "id": "A14",
+      "status": "Partial",
+      "detail": "Current execution, source-time semantics, limitations and model comparison are documented. This does not close every inline documentation gap in the older modules.",
+      "evidence": "docs/rebuilt-project.md; docs/model-comparison.md"
+    },
+    {
+      "id": "A15",
+      "status": "Open",
+      "detail": "Legacy and rebuilt workflows coexist. Broad removal of unused scaffolding and consolidation of duplicate implementations have not been completed.",
+      "evidence": "config/audit-findings.json; docs/rebuilt-project.md"
+    },
+    {
+      "id": "A16",
+      "status": "Partial",
+      "detail": "The rebuilt app renders its own tested charts and static model exports. The legacy SDK and original explorer contract have not been fully revalidated.",
+      "evidence": "frontend/src/ProjectApp.tsx; tests/unit/test_model_comparison.py"
+    },
+    {
+      "id": "A17",
+      "status": "Partial",
+      "detail": "Current pages use only rebuilt model exports and exclude obsolete production scores. Older artifacts remain on disk and are not certified for use.",
+      "evidence": "frontend/src/CurrentAuditApp.tsx; frontend/src/ProjectApp.tsx; docs/rebuilt-project.md"
+    },
+    {
+      "id": "A18",
+      "status": "Open",
+      "detail": "Redundant local outputs have not been deleted. Source archives are retained; disk cleanup still needs a scoped review.",
+      "evidence": "config/audit-findings.json"
+    },
+    {
+      "id": "A19",
+      "status": "Resolved in rebuild",
+      "detail": "Maintained guides describe the current workflow. Historical assessment inputs and generated audit reports are separate from project documentation; model results are generated from the published run.",
+      "evidence": "docs/README.md; scripts/build_audit_report.py; scripts/document_model_comparison.py"
+    },
+    {
+      "id": "A20",
+      "status": "Partial",
+      "detail": "The rebuild records source hashes, dependencies, contracts and generated artifact hashes. No PostgreSQL migration, isolated database integration run or live deployment has been validated.",
+      "evidence": "scripts/rebuild_project.py; tests/unit/test_model_comparison.py; docs/rebuilt-project.md"
+    },
+    {
+      "id": "A21",
+      "status": "Partial",
+      "detail": "Real hourly ERA5 weather is joined for descriptive usage comparisons. Counts remain recorded trips because the 2022 CSVs lack a reliable customer/operator flag; neither latent demand nor a causal rain effect is established.",
+      "evidence": "src/ingestion/weather.py; src/ml/weather_analysis.py; docs/rebuilt-project.md"
+    },
+    {
+      "id": "A22",
+      "status": "Resolved in rebuild",
+      "detail": "Every candidate uses the same nonnegative postprocessing for evaluation and web exports. Selected exports and all-model metrics were independently reconciled.",
+      "evidence": "src/ml/model_comparison.py; tests/unit/test_model_comparison.py"
+    },
+    {
+      "id": "A23",
+      "status": "Resolved in rebuild",
+      "detail": "Python tests, Ruff, mypy and frontend checks are available. Consult the latest check output or CI run for their status; this assessment is not a live CI indicator.",
+      "evidence": "docs/developer-guide.md; .github/workflows/ci.yml"
+    }
+  ]
+}

@@ -23,6 +23,7 @@ env/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.test-tmp/
 .mypy_cache/
 .ruff_cache/
 .ipynb_checkpoints/
@@ -48,7 +49,11 @@ Thumbs.db
 # Local/generated outputs
 /$out/
 /$root/
-/status_source_inventory.json
-/_probe_common_population.py
 logs/
 *.log
+
+# Locally generated real-data audit exports (regenerate with scripts/build_audit_report.py)
+frontend/public/audit-data/
+frontend/public/project-data/
+
+frontend/public/analysis-data/

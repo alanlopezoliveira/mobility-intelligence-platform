@@ -9,20 +9,23 @@ import time
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import psycopg
 
+from src.ml.calendar_features import local_calendar_features
 from src.ml.canonical_demand_store import AUTHORITATIVE_GOLD_HASH, SOURCE_NAME
 
 LAGS_HOURS = (1, 2, 3, 6, 12, 24, 48, 168)
 DATASET_COLUMNS = [
-    'station_id', 'feature_timestamp', 'demand_at_feature_time', 'target_timestamp',
+    'provider_id', 'network_id', 'station_instance_id', 'station_id', 'feature_timestamp', 'demand_at_feature_time', 'target_timestamp',
     'target_departures', 'demand_lag_1h', 'demand_lag_1h_available', 'demand_lag_2h',
     'demand_lag_2h_available', 'demand_lag_3h', 'demand_lag_3h_available', 'demand_lag_6h',
     'demand_lag_6h_available', 'demand_lag_12h', 'demand_lag_12h_available', 'demand_lag_24h',
     'demand_lag_24h_available', 'demand_lag_48h', 'demand_lag_48h_available', 'demand_lag_168h',
-    'demand_lag_168h_available', 'hour', 'day_of_week', 'day_of_month', 'month', 'weekend',
+    'demand_lag_168h_available', 'local_hour', 'hour_sin', 'hour_cos', 'local_weekday',
+    'weekday_sin', 'weekday_cos', 'day_of_month', 'month', 'month_sin', 'month_cos',
+    'year', 'weekend', 'utc_offset_minutes', 'dst_fold',
     'horizon_minutes', 'split',
 ]
 
@@ -50,6 +53,7 @@ def _split_boundaries(connection: psycopg.Connection) -> dict[str, datetime]:
                 SELECT DISTINCT observed_at
                 FROM demand_observations
                 WHERE source_name = %s
+                  AND batch_id = (SELECT batch_id FROM active_dataset_version WHERE singleton_id = 1)
                 ORDER BY observed_at
             ) timestamps
             """,
@@ -78,22 +82,30 @@ def _query(horizon: int, boundaries: dict[str, datetime]) -> tuple[str, tuple[ob
         lag_joins.append(
             f'''LEFT JOIN demand_observations {alias}
                 ON {alias}.source_name = %s
-               AND {alias}.station_id = feature.station_id
+               AND {alias}.batch_id = (SELECT batch_id FROM active_dataset_version WHERE singleton_id = 1)
+               AND {alias}.provider_id = feature.provider_id
+               AND {alias}.network_id = feature.network_id
+               AND {alias}.station_instance_id = feature.station_instance_id
                AND {alias}.observed_at = feature.observed_at - INTERVAL '{lag} hours' '''
         )
         select_values.extend([f'{alias}.demand', f'{alias}.demand IS NOT NULL'])
     select_sql = ', '.join(select_values)
     sql = f'''
-        SELECT feature.station_id, feature.observed_at, feature.demand,
+        SELECT feature.provider_id, feature.network_id, feature.station_instance_id,
+               feature.station_id, feature.observed_at, feature.demand,
                feature.observed_at + INTERVAL '{horizon} minutes', target.demand,
                {select_sql}
         FROM demand_observations feature
         JOIN demand_observations target
           ON target.source_name = %s
-         AND target.station_id = feature.station_id
+         AND target.batch_id = (SELECT batch_id FROM active_dataset_version WHERE singleton_id = 1)
+         AND target.provider_id = feature.provider_id
+         AND target.network_id = feature.network_id
+         AND target.station_instance_id = feature.station_instance_id
          AND target.observed_at = feature.observed_at + INTERVAL '{horizon} minutes'
         {' '.join(lag_joins)}
         WHERE feature.source_name = %s
+          AND feature.batch_id = (SELECT batch_id FROM active_dataset_version WHERE singleton_id = 1)
           AND CASE
                 WHEN feature.observed_at <= %s THEN target.observed_at <= %s
                 WHEN feature.observed_at <= %s THEN target.observed_at <= %s
@@ -118,16 +130,14 @@ def _split(timestamp: datetime, boundaries: dict[str, datetime]) -> str:
     return 'test'
 
 
-def _row(values: tuple[object, ...], horizon: int, boundaries: dict[str, datetime]) -> list[object]:
-    station_id, feature_timestamp, feature_demand, target_timestamp, target_demand, *lags = values
-    result: list[object] = [station_id, feature_timestamp, feature_demand, target_timestamp, target_demand]
+def _row(values: tuple[object, ...], horizon: int, boundaries: dict[str, datetime], timezone_name: str) -> list[object]:
+    provider_id, network_id, station_instance_id, station_id, feature_timestamp, feature_demand, target_timestamp, target_demand, *lags = values
+    feature_timestamp = cast(datetime, feature_timestamp)
+    result: list[object] = [provider_id, network_id, station_instance_id, station_id, feature_timestamp, feature_demand, target_timestamp, target_demand]
     for index in range(0, len(lags), 2):
         result.extend([lags[index], lags[index + 1]])
-    result.extend([
-        feature_timestamp.hour, feature_timestamp.weekday(), feature_timestamp.day,
-        feature_timestamp.month, feature_timestamp.weekday() in (5, 6), horizon,
-        _split(feature_timestamp, boundaries),
-    ])
+    result.extend(local_calendar_features(feature_timestamp, timezone_name).values())
+    result.extend([horizon, _split(feature_timestamp, boundaries)])
     return result
 
 
@@ -136,6 +146,8 @@ def _stream_artifact(
     horizon: int,
     path: Path,
     boundaries: dict[str, datetime],
+    timezone_name: str,
+    calendar_version: str,
 ) -> dict[str, Any]:
     sql, params = _query(horizon, boundaries)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -155,15 +167,15 @@ def _stream_artifact(
                 cursor.execute(sql, params)
                 while rows := cursor.fetchmany(20_000):
                     for values in rows:
-                        row = _row(values, horizon, boundaries)
+                        row = _row(values, horizon, boundaries, timezone_name)
                         writer.writerow(row)
                         serialized = '|'.join(_canonical_value(value) for value in row)
                         digest.update(serialized.encode('utf-8'))
                         digest.update(b'\n')
                         counts[str(row[-1])] += 1
-                        stations.add(str(row[0]))
+                        stations.add(str(row[3]))
                         for index, lag in enumerate(LAGS_HOURS):
-                            if row[6 + index * 2 + 1]:
+                            if row[9 + index * 2]:
                                 lag_available[f'demand_lag_{lag}h_available'] += 1
         os.replace(temporary, path)
     finally:
@@ -171,6 +183,9 @@ def _stream_artifact(
             temporary.unlink()
     return {
         'horizon_minutes': horizon,
+        'provider_timezone': timezone_name,
+        'calendar_version': calendar_version,
+        'holiday_calendar_status': 'unresolved; this calendar version encodes local weekdays but not public holidays',
         'source_gold_hash': AUTHORITATIVE_GOLD_HASH,
         'examples_generated': sum(counts.values()),
         'rows_after_split_boundary_purge': sum(counts.values()),
@@ -190,13 +205,32 @@ def build_from_database(database_url: str, output: Path, skip_existing: bool = F
     reports: dict[str, Any] = {}
     with psycopg.connect(database_url) as connection:
         boundaries = _split_boundaries(connection)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT DISTINCT p.provider_id, p.timezone, p.calendar_version
+                   FROM demand_observations d
+                   JOIN active_dataset_version v ON v.singleton_id = 1 AND d.batch_id = v.batch_id
+                   JOIN provider_metadata p ON p.provider_id = d.provider_id""",
+            )
+            timezone_rows = cursor.fetchall()
+        if len(timezone_rows) != 1:
+            raise RuntimeError('Provider timezone metadata is missing; local calendar features cannot be generated')
+        timezone_name = str(timezone_rows[0][1])
+        calendar_version = str(timezone_rows[0][2])
         for horizon in (60, 120):
             path = output / f'forecasting_dataset_{horizon}m.csv.gz'
             if skip_existing and path.exists() and path.stat().st_size > 0:
                 reports[str(horizon)] = {'horizon_minutes': horizon, 'dataset_artifact': str(path), 'reused': True}
                 continue
-            reports[str(horizon)] = _stream_artifact(connection, horizon, path, boundaries)
-    return {'reports': reports, 'split_boundaries': {key: _utc_text(value) for key, value in boundaries.items()}}
+            reports[str(horizon)] = _stream_artifact(connection, horizon, path, boundaries, timezone_name, calendar_version)
+    return {
+        'reports': reports,
+        'split_boundaries': {key: _utc_text(value) for key, value in boundaries.items()},
+        'feature_set_version': 'local-calendar-v1',
+        'provider_timezone': timezone_name,
+        'calendar_version': calendar_version,
+        'holiday_calendar_status': 'unresolved; no authoritative holiday dates are configured',
+    }
 
 
 def validate_artifact(
@@ -225,33 +259,45 @@ def validate_artifact(
             rows = [row for row in rows if row is not None]
             if not rows:
                 break
-            keys: list[tuple[str, datetime]] = []
+            keys: list[tuple[str, str, str, datetime]] = []
             parsed: list[tuple[dict[str, str], datetime, datetime]] = []
-            for row in rows:
-                feature_timestamp = datetime.fromisoformat(row['feature_timestamp'])
-                target_timestamp = datetime.fromisoformat(row['target_timestamp'])
-                parsed.append((row, feature_timestamp, target_timestamp))
-                station_id = row['station_id']
-                keys.append((station_id, target_timestamp))
+            for raw_row in cast(list[dict[str, str | None]], rows):
+                feature_timestamp_value = raw_row['feature_timestamp']
+                target_timestamp_value = raw_row['target_timestamp']
+                station_id_value = raw_row['station_id']
+                provider_id = raw_row['provider_id']
+                network_id = raw_row['network_id']
+                station_instance_id = raw_row['station_instance_id']
+                if any(value is None for value in (feature_timestamp_value, target_timestamp_value, station_id_value, provider_id, network_id, station_instance_id)):
+                    violations['schema'] += 1
+                    continue
+                feature_timestamp = datetime.fromisoformat(cast(str, feature_timestamp_value))
+                target_timestamp = datetime.fromisoformat(cast(str, target_timestamp_value))
+                parsed.append((cast(dict[str, str], raw_row), feature_timestamp, target_timestamp))
+                identity = (str(provider_id), str(network_id), str(station_instance_id))
+                keys.append((*identity, target_timestamp))
                 for lag in LAGS_HOURS:
-                    keys.append((station_id, feature_timestamp - timedelta(hours=lag)))
+                    keys.append((*identity, feature_timestamp - timedelta(hours=lag)))
             unique_keys = list(dict.fromkeys(keys))
-            values = [(station_id, timestamp) for station_id, timestamp in unique_keys]
+            values = unique_keys
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    SELECT station_id, observed_at, demand
+                    SELECT provider_id, network_id, station_instance_id, observed_at, demand
                     FROM demand_observations
                     WHERE source_name = %s
-                      AND (station_id, observed_at) IN
-                          (SELECT * FROM UNNEST(%s::text[], %s::timestamptz[]))
+                      AND batch_id = (SELECT batch_id FROM active_dataset_version WHERE singleton_id = 1)
+                      AND (provider_id, network_id, station_instance_id, observed_at) IN
+                          (SELECT * FROM UNNEST(%s::text[], %s::text[], %s::text[], %s::timestamptz[]))
                     """,
-                    (SOURCE_NAME, [key[0] for key in values], [key[1] for key in values]),
+                    (SOURCE_NAME, *[[key[index] for key in values] for index in range(4)]),
                 )
-                lookup = {(str(station_id), observed_at): float(demand) for station_id, observed_at, demand in cursor.fetchall()}
+                lookup = {(str(provider_id), str(network_id), str(instance_id), observed_at): float(demand)
+                          for provider_id, network_id, instance_id, observed_at, demand in cursor.fetchall()}
             for row, feature_timestamp, target_timestamp in parsed:
                 row_count += 1
                 station_id = row['station_id']
+                identity = (row['provider_id'], row['network_id'], row['station_instance_id'])
                 stations.add(station_id)
                 split = row['split']
                 split_counts[split] += 1
@@ -263,7 +309,7 @@ def validate_artifact(
                     violations['target_timestamp'] += 1
                 if target_timestamp <= feature_timestamp:
                     violations['target_after_feature'] += 1
-                target = lookup.get((station_id, target_timestamp))
+                target = lookup.get((*identity, target_timestamp))
                 if target is None:
                     violations['target_missing'] += 1
                 elif float(row['target_departures']) != target:
@@ -271,7 +317,7 @@ def validate_artifact(
                 for lag in LAGS_HOURS:
                     value_column = f'demand_lag_{lag}h'
                     available_column = f'{value_column}_available'
-                    expected = lookup.get((station_id, feature_timestamp - timedelta(hours=lag)))
+                    expected = lookup.get((*identity, feature_timestamp - timedelta(hours=lag)))
                     available = row[available_column] == 'True'
                     actual = None if row[value_column] == '' else float(row[value_column])
                     if expected is None:

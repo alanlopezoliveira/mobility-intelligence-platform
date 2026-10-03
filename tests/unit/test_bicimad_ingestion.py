@@ -1,4 +1,5 @@
 import io
+import json
 import shutil
 import tomllib
 import zipfile
@@ -16,6 +17,7 @@ from src.ingestion.bicimad import (
     _iter_inner_members,
     _legacy_json_trips,
     _parse_datetime_details,
+    _write_archive_manifest,
     aggregate_trips,
     parse_station_snapshot_json,
     persist_demand,
@@ -38,6 +40,20 @@ def test_dst_policy_uses_declared_pandas_runtime_stack():
     project = tomllib.loads(project_file.read_text(encoding='utf-8'))
     dependencies = {dependency.split('>=', 1)[0].lower() for dependency in project['project']['dependencies']}
     assert 'pandas' in dependencies
+
+
+def test_archive_manifest_records_and_verifies_source_archive_hash(tmp_path):
+    archive_path = tmp_path / '2023.zip'
+    archive_path.write_bytes(_zip_bytes({'trips.csv': CSV_TRIP}))
+
+    _write_archive_manifest(archive_path, 2023, 'https://example.test/2023.zip', datetime(2024, 1, 1, tzinfo=UTC))
+    manifest_path = archive_path.with_suffix('.manifest.json')
+    manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+
+    assert manifest['source_year'] == 2023
+    assert manifest['archive_sha256']
+    assert manifest['archive_size_bytes'] == archive_path.stat().st_size
+    assert manifest['retrieval_time_known'] is True
 
 
 def test_recursive_archive_extracts_csv_and_preserves_provenance():
@@ -169,10 +185,51 @@ def test_csv_tracks_timestamp_resolution_and_parse_counts():
 
 class RecordingSession:
     def __init__(self):
-        self.statements = []
+        self.rows = [{'batch_id': 'previous-batch', 'station_id': 'old'}]
+        self.active_batch_id = 'previous-batch'
+        self.batch = None
+        self.fail_after_partial_insert = False
+        self.fail_validation = False
 
-    def execute(self, statement):
-        self.statements.append(statement)
+    def execute(self, statement, parameters=None):
+        if statement.is_select:
+            table_names = {table.name for table in statement.get_final_froms()}
+            if 'ingestion_batches' in table_names:
+                return FakeResult(self.batch)
+            if 'demand_observations' in table_names:
+                if 'source_record_hash' in str(statement):
+                    return FakeResult(1 if self.fail_validation else 0)
+                params = statement.compile().params
+                batch_id = next((value for key, value in params.items() if 'batch_id' in key), None)
+                return FakeResult(sum(row.get('batch_id') == batch_id for row in self.rows))
+        if statement.is_delete:
+            params = statement.compile().params
+            batch_id = next((value for key, value in params.items() if 'batch_id' in key), None)
+            self.rows = [row for row in self.rows if row.get('batch_id') != batch_id]
+        if statement.is_insert:
+            if statement.table.name == 'demand_observations':
+                rows = list(parameters or [])
+                self.rows.extend(rows[:1] if self.fail_after_partial_insert else rows)
+                if self.fail_after_partial_insert:
+                    raise RuntimeError('injected interruption during staged batch insert')
+            if statement.table.name == 'active_dataset_version':
+                values = statement._values
+                self.active_batch_id = next(value.value for column, value in values.items() if column.key == 'batch_id')
+        return FakeResult(None)
+
+    def add(self, value):
+        self.batch = value
+
+
+class FakeResult:
+    def __init__(self, value):
+        self.value = value
+
+    def scalar_one_or_none(self):
+        return self.value
+
+    def scalar_one(self):
+        return self.value
 
 
 class RecordingSessionFactory:
@@ -189,7 +246,7 @@ class RecordingSessionFactory:
         return False
 
 
-def test_persist_demand_replaces_only_historical_source_on_each_run(monkeypatch):
+def test_persist_demand_publishes_content_addressed_batch_and_keeps_previous_version(monkeypatch):
     frame = pd.DataFrame([
         {
             'timestamp': datetime(2023, 1, 1, tzinfo=UTC),
@@ -206,11 +263,47 @@ def test_persist_demand_replaces_only_historical_source_on_each_run(monkeypatch)
     monkeypatch.setenv('PERSIST_TO_DATABASE', 'true')
 
     assert persist_demand(frame, session_factory=factory) == 1
+    published_id = factory.session.active_batch_id
     assert persist_demand(frame, session_factory=factory) == 1
 
-    assert sum(statement.is_delete for statement in factory.session.statements) == 2
-    assert sum(statement.is_insert for statement in factory.session.statements) == 2
-    assert 'source_name' in str(factory.session.statements[0])
+    assert published_id != 'previous-batch'
+    assert factory.session.active_batch_id == published_id
+    assert factory.session.batch.status == 'published'
+    assert any(row.get('batch_id') == 'previous-batch' for row in factory.session.rows)
+    assert any(row.get('batch_id') == published_id for row in factory.session.rows)
+
+
+def _one_row_demand_frame():
+    return pd.DataFrame([{
+        'timestamp': datetime(2023, 1, 1, tzinfo=UTC), 'station_id': '1',
+        'departures': 1, 'arrivals': 0, 'total_activity': 1, 'net_flow': -1,
+        'demand': 1, 'source_year': 2023,
+    }])
+
+
+def test_interrupted_batch_never_changes_active_version(monkeypatch):
+    factory = RecordingSessionFactory()
+    factory.session.fail_after_partial_insert = True
+    monkeypatch.setenv('PERSIST_TO_DATABASE', 'true')
+
+    with pytest.raises(RuntimeError, match='injected interruption'):
+        persist_demand(_one_row_demand_frame(), session_factory=factory)
+
+    assert factory.session.active_batch_id == 'previous-batch'
+    assert any(row.get('batch_id') not in {'previous-batch', None} for row in factory.session.rows)
+
+
+def test_validation_failure_after_partial_write_keeps_previous_active_version(monkeypatch):
+    factory = RecordingSessionFactory()
+    factory.session.fail_validation = True
+    monkeypatch.setenv('PERSIST_TO_DATABASE', 'true')
+
+    with pytest.raises(RuntimeError, match='failed count or invariant validation'):
+        persist_demand(_one_row_demand_frame(), session_factory=factory)
+
+    assert factory.session.active_batch_id == 'previous-batch'
+    assert factory.session.batch.status == 'failed'
+    assert any(row.get('batch_id') not in {'previous-batch', None} for row in factory.session.rows)
 
 
 def test_persist_demand_fails_on_duplicate_canonical_keys(monkeypatch):
@@ -266,7 +359,8 @@ def test_legacy_json_schema_normalizes_origin_destination_and_time():
     assert trips[0].origin_station == '41'
     assert trips[0].destination_station == '50'
     assert trips[0].started_at.tzinfo == UTC
-    assert trips[0].duration_minutes == 30
+    assert trips[0].duration_minutes == 0.5
+    assert trips[0].ended_at is None
 
 
 def test_csv_schema_normalizes_station_fields_and_delimiter():
@@ -343,8 +437,8 @@ def test_csv_trips_accepts_real_2021_october_row_shape():
 def test_aggregate_creates_hourly_departures_arrivals_and_activity():
     trips = iter(
         [
-            Trip(2023, 'a', datetime(2023, 1, 1, 0, 10, tzinfo=UTC), None, '1', '2', None, 'x'),
-            Trip(2023, 'b', datetime(2023, 1, 1, 0, 40, tzinfo=UTC), None, '1', '2', None, 'x'),
+            Trip(2023, 'a', datetime(2023, 1, 1, 0, 10, tzinfo=UTC), datetime(2023, 1, 1, 1, 10, tzinfo=UTC), '1', '2', None, 'x'),
+            Trip(2023, 'b', datetime(2023, 1, 1, 0, 40, tzinfo=UTC), datetime(2023, 1, 1, 1, 40, tzinfo=UTC), '1', '2', None, 'x'),
         ]
     )
     frame, quality = aggregate_trips(trips)

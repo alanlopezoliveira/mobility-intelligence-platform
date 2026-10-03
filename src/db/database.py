@@ -5,14 +5,11 @@ from collections.abc import Iterator
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from src.config.settings import DatabaseSettings
+from src.config.settings import DatabaseSettings, normalize_database_url
 
 
 def _database_url() -> str:
-    url = DatabaseSettings().url
-    if url.startswith("postgresql://"):
-        return url.replace("postgresql://", "postgresql+psycopg://", 1)
-    return url
+    return normalize_database_url(DatabaseSettings().url)
 
 
 engine = create_engine(_database_url(), pool_pre_ping=True)

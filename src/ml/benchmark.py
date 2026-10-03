@@ -15,6 +15,8 @@ import pandas as pd
 from lightgbm import LGBMRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
+from src.ml.canonical_demand_store import AUTHORITATIVE_GOLD_HASH
+
 TARGET_COLUMN = 'target_departures'
 SPLIT_COLUMN = 'split'
 HORIZONS_MINUTES = (60, 120)
@@ -74,7 +76,7 @@ def _stable_float(value: object) -> float | None:
     if value is None or pd.isna(value):
         return None
     try:
-        return float(value)
+        return float(str(value))
     except (TypeError, ValueError):
         return None
 
@@ -235,7 +237,7 @@ def _validate_unique_row_keys(frame: pd.DataFrame, *, label: str) -> dict[str, A
     duplicates = int(row_key_series.duplicated().sum())
     return {
         'label': label,
-        'rows': int(len(frame)),
+        'rows': len(frame),
         'unique_keys': int(row_key_series.nunique()),
         'duplicate_keys': duplicates,
         'status': 'PASS' if duplicates == 0 else 'BLOCKED',
@@ -265,7 +267,7 @@ def _compute_metric_summary(actual: pd.Series, prediction: pd.Series) -> dict[st
         sse = float(np.sum(np.square(errors)))
         sst = float(np.sum(np.square(actual_values - np.mean(actual_values))))
         r2 = float(1.0 - (sse / sst)) if sst else None
-    return {'mae': mae, 'rmse': rmse, 'r2': r2, 'n_predictions': int(len(actual_values))}
+    return {'mae': mae, 'rmse': rmse, 'r2': r2, 'n_predictions': len(actual_values)}
 
 
 def evaluate_common_population(dataset: pd.DataFrame, predictions: pd.DataFrame, *, horizon: int) -> dict[str, Any]:
@@ -339,12 +341,12 @@ def evaluate_common_population(dataset: pd.DataFrame, predictions: pd.DataFrame,
             prediction = filtered[lag_column]
         metrics = _compute_metric_summary(actual, prediction)
         return {
-            'common_population_rows': int(len(actual)),
+            'common_population_rows': len(actual),
             'mae': metrics['mae'],
             'rmse': metrics['rmse'],
             'r2': metrics['r2'],
             'n_predictions': metrics['n_predictions'],
-            'coverage': float(metrics['n_predictions'] / len(target_keys)) if target_keys else 0.0,
+            'coverage': float(int(metrics['n_predictions'] or 0) / len(target_keys)) if target_keys else 0.0,
         }
 
     metrics_by_model = {model_name: metric_payload(model_name, common_keys) for model_name in ['lightgbm', 'naive_1h', 'seasonal_naive_24h', 'seasonal_naive_168h']}
@@ -361,6 +363,13 @@ def evaluate_common_population(dataset: pd.DataFrame, predictions: pd.DataFrame,
 def _row_key_hash(key_set: set[tuple[str, str, str, str, str]]) -> str:
     normalized = sorted(tuple(str(value) for value in row) for row in key_set)
     return hashlib.sha256(_canonical_json(normalized).encode('utf-8')).hexdigest()
+
+
+def _deserialize_row_key(key: str) -> tuple[str, str, str, str, str]:
+    parts = key.split('\x1f')
+    if len(parts) != 5:
+        raise ValueError('Invalid serialized forecasting row key')
+    return parts[0], parts[1], parts[2], parts[3], parts[4]
 
 
 def _json_safe(value: Any) -> Any:
@@ -470,7 +479,7 @@ def _build_benchmark_v2_common_population(dataset: pd.DataFrame, predictions: pd
         'common_population_rows': len(common_keys),
         'common_population_coverage': common_population_coverage,
         'percentage_of_total_target_population': common_population_coverage,
-        'common_population_hash': _row_key_hash({tuple(key.split('\x1f')) for key in common_keys}),
+        'common_population_hash': _row_key_hash({_deserialize_row_key(key) for key in common_keys}),
         'model_rows': {model_name: len(rows) for model_name, rows in model_sets.items()},
         'all_models_share_same_population': equality_ok,
         'row_set_equality': {model_name: model_sets[model_name] == common_keys for model_name in model_sets},
@@ -481,7 +490,6 @@ def _build_benchmark_v2_common_population(dataset: pd.DataFrame, predictions: pd
 def build_common_population_audit(root_dir: Path | None = None) -> dict[str, Any]:
     root = root_dir or Path(__file__).resolve().parents[2]
     output_root = root / 'models' / 'experiments' / 'benchmark_v1'
-    summary_path = output_root / 'summary.json'
     summary, summary_error = _load_valid_benchmark_v1_summary(root)
     if summary is None:
         report: dict[str, Any] = {
@@ -493,7 +501,7 @@ def build_common_population_audit(root_dir: Path | None = None) -> dict[str, Any
         (output_root / 'comparability_audit.json').write_text(json.dumps(report, indent=2, sort_keys=True) + '\n', encoding='utf-8')
         return report
 
-    report: dict[str, Any] = {
+    report = {
         'status': 'PASS',
         'horizons': {},
         'blocking_reasons': [],
@@ -652,7 +660,7 @@ def _load_prediction_artifact(path_value: str | Path | None) -> pd.DataFrame | N
     path = Path(path_value)
     if not path.exists():
         return None
-    ok, reason = _validate_prediction_artifact(path)
+    ok, _reason = _validate_prediction_artifact(path)
     if not ok:
         return None
     try:
@@ -666,12 +674,8 @@ def generate_benchmark_v2(root_dir: Path | None = None) -> dict[str, Any]:
     output_root = root / 'models' / 'experiments' / 'benchmark_v2'
     output_root.mkdir(parents=True, exist_ok=True)
     benchmark_v1_root = root / 'models' / 'experiments' / 'benchmark_v1'
-    cached_summary = _load_cached_benchmark_v2_summary(output_root)
-    if cached_summary is not None:
-        return cached_summary
-
     datasets_dir = root / 'data' / 'gold' / 'forecasting'
-    canonical_data_hash = '0a747a132ab6401621df226d96e155b0dbf435d5992bb78e35e3c9461f24e288'
+    canonical_data_hash = AUTHORITATIVE_GOLD_HASH
     dataset_contract_hash = _sha256_file(datasets_dir / 'forecasting_contract.json')
 
     summary_reference, summary_error = _load_valid_benchmark_v1_summary(root)
@@ -698,8 +702,7 @@ def generate_benchmark_v2(root_dir: Path | None = None) -> dict[str, Any]:
         summary_path.write_text(json.dumps(_json_safe(summary), indent=2, sort_keys=True) + '\n', encoding='utf-8')
         return summary
 
-    audit = build_common_population_audit(root)
-    summary: dict[str, Any] = {
+    summary = {
         'experiment_id': 'ml_benchmark_v2',
         'timestamp': datetime.now(UTC).strftime('%Y-%m-%dT%H:%M:%SZ'),
         'provider': 'bicimad_historical_trips',
@@ -712,6 +715,7 @@ def generate_benchmark_v2(root_dir: Path | None = None) -> dict[str, Any]:
         'random_seed': 42,
         'dataset_contract_hash': dataset_contract_hash,
         'canonical_data_hash': canonical_data_hash,
+        'dataset_artifact_hashes': {},
         'benchmark_v1_reference': str(benchmark_v1_root / 'comparability_audit.json'),
         'next_experiment': 'benchmark_v3_model_improvement',
         'horizons': {},
@@ -736,9 +740,44 @@ def generate_benchmark_v2(root_dir: Path | None = None) -> dict[str, Any]:
                 dataset[column] = pd.to_numeric(dataset[column], errors='coerce')
         stage_diagnostics.append({
             'stage': 'dataset_load',
-            'rows': int(len(dataset)),
+            'rows': len(dataset),
             'status': 'PASS',
         })
+
+        v1_horizon_root = benchmark_v1_root / f'{horizon}m'
+        v1_metadata_path = v1_horizon_root / 'metadata.json'
+        v1_predictions_path = v1_horizon_root / 'predictions.csv.gz'
+        v1_metadata = json.loads(v1_metadata_path.read_text(encoding='utf-8'))
+        dataset_hash = _sha256_file(dataset_path)
+        try:
+            v1_metadata = json.loads(v1_metadata_path.read_text(encoding='utf-8'))
+            predictions = pd.read_csv(v1_predictions_path, compression='gzip', low_memory=False)
+        except (OSError, json.JSONDecodeError, pd.errors.ParserError, EOFError):
+            summary['status'] = 'BLOCKED'
+            summary['comparability'] = 'BLOCKED'
+            summary['scientific_reproducibility'] = 'BLOCKED'
+            summary['blocking_reasons'].append(f'Horizon {horizon}: benchmark_v1 metadata or prediction artifact is missing or invalid.')
+            continue
+        if (
+            not isinstance(v1_metadata, dict)
+            or v1_metadata.get('canonical_data_hash') != canonical_data_hash
+            or v1_metadata.get('forecasting_dataset_hash') != dataset_hash
+            or v1_metadata.get('dataset_contract_hash') != dataset_contract_hash
+        ):
+            summary['status'] = 'BLOCKED'
+            summary['comparability'] = 'BLOCKED'
+            summary['scientific_reproducibility'] = 'BLOCKED'
+            summary['blocking_reasons'].append(
+                f'Horizon {horizon}: benchmark_v1 predictions do not match the current canonical data, dataset, or contract.'
+            )
+            continue
+        predictions['station_id'] = predictions['station_id'].astype(str)
+        predictions['split'] = predictions['split'].astype(str)
+        predictions['feature_timestamp'] = pd.to_datetime(predictions['feature_timestamp'], utc=True)
+        predictions['target_timestamp'] = pd.to_datetime(predictions['target_timestamp'], utc=True)
+        predictions['horizon_minutes'] = pd.to_numeric(predictions['horizon_minutes'], errors='coerce').astype('Int64').astype(int)
+        predictions['y_true'] = pd.to_numeric(predictions['y_true'], errors='coerce')
+        predictions['y_pred'] = pd.to_numeric(predictions['y_pred'], errors='coerce')
 
         candidate_sets: dict[str, set[str]] = {
             'lightgbm': set(),
@@ -748,6 +787,28 @@ def generate_benchmark_v2(root_dir: Path | None = None) -> dict[str, Any]:
         }
         target_frame = dataset[(dataset['split'] == 'test') & (dataset['horizon_minutes'] == horizon) & dataset['target_departures'].notna()].copy()
         target_keys = set(_vectorized_row_key(target_frame).tolist())
+        lgbm_frame = predictions[
+            (predictions['split'] == 'test')
+            & (predictions['horizon_minutes'] == horizon)
+            & predictions['y_true'].notna()
+            & predictions['y_pred'].notna()
+        ].copy()
+        target_key_check = _validate_unique_row_keys(target_frame, label='target_rows')
+        prediction_key_check = _validate_unique_row_keys(lgbm_frame, label='lightgbm_predictions')
+        stage_diagnostics.extend([target_key_check, prediction_key_check])
+        if target_key_check['status'] != 'PASS' or prediction_key_check['status'] != 'PASS':
+            summary['status'] = 'BLOCKED'
+            summary['comparability'] = 'BLOCKED'
+            summary['scientific_reproducibility'] = 'BLOCKED'
+            summary['blocking_reasons'].append(f'Horizon {horizon}: duplicate target or model prediction keys were found.')
+            continue
+        candidate_sets['lightgbm'] = set(_vectorized_row_key(lgbm_frame).tolist())
+        if not candidate_sets['lightgbm'].issubset(target_keys):
+            summary['status'] = 'BLOCKED'
+            summary['comparability'] = 'BLOCKED'
+            summary['scientific_reproducibility'] = 'BLOCKED'
+            summary['blocking_reasons'].append(f'Horizon {horizon}: LightGBM prediction keys do not match the held-out dataset.')
+            continue
         for model_name, lag_column in {
             'naive_1h': 'demand_lag_1h',
             'seasonal_naive_24h': 'demand_lag_24h',
@@ -757,18 +818,15 @@ def generate_benchmark_v2(root_dir: Path | None = None) -> dict[str, Any]:
             candidate[lag_column] = pd.to_numeric(candidate[lag_column], errors='coerce')
             valid = candidate[candidate[lag_column].notna()].copy()
             candidate_sets[model_name] = set(_vectorized_row_key(valid).tolist())
-        candidate_sets['lightgbm'] = set(target_keys)
-        stage_diagnostics.append(_validate_unique_row_keys(target_frame, label='target_rows'))
-
         common_keys = set.intersection(*candidate_sets.values())
+        all_equal = bool(common_keys) and all(common_keys.issubset(rows) for rows in candidate_sets.values())
         stage_diagnostics.append({
             'stage': 'common_population',
             'rows': len(common_keys),
             'coverage': float(len(common_keys) / len(target_keys)) if target_keys else 0.0,
-            'all_models_share_same_population': bool(all(model_sets == common_keys for model_sets in candidate_sets.values())),
-            'status': 'PASS' if common_keys else 'BLOCKED',
+            'all_models_share_same_population': all_equal,
+            'status': 'PASS' if all_equal else 'BLOCKED',
         })
-        all_equal = all(candidate_sets[model_name] == common_keys for model_name in candidate_sets)
         model_rows = {model_name: set(candidate_sets[model_name]) for model_name in candidate_sets}
         if not all_equal or not common_keys:
             summary['status'] = 'BLOCKED'
@@ -776,14 +834,33 @@ def generate_benchmark_v2(root_dir: Path | None = None) -> dict[str, Any]:
             summary['scientific_reproducibility'] = 'BLOCKED'
             summary['blocking_reasons'].append(f'Horizon {horizon}: common population is invalid or not identical across all models.')
 
+        row_columns = ['station_id', 'feature_timestamp', 'target_timestamp', 'horizon_minutes', 'split']
+        common_targets = _filter_by_row_keys(target_frame, common_keys)
+        lightgbm_common = _filter_by_row_keys(lgbm_frame, common_keys)
+        lightgbm_joined = common_targets[row_columns + ['target_departures']].merge(
+            lightgbm_common[row_columns + ['y_true', 'y_pred']],
+            on=row_columns,
+            how='inner',
+            validate='one_to_one',
+        )
+        labels_match = len(lightgbm_joined) == len(common_keys) and np.allclose(
+            lightgbm_joined['target_departures'].to_numpy(dtype=float),
+            lightgbm_joined['y_true'].to_numpy(dtype=float),
+            rtol=0,
+            atol=1e-9,
+        )
+        if not labels_match:
+            summary['status'] = 'BLOCKED'
+            summary['comparability'] = 'BLOCKED'
+            summary['scientific_reproducibility'] = 'BLOCKED'
+            summary['blocking_reasons'].append(f'Horizon {horizon}: LightGBM prediction labels do not reconcile to held-out targets.')
+            continue
+
         metrics: dict[str, Any] = {}
         for model_name in ['lightgbm', 'naive_1h', 'seasonal_naive_24h', 'seasonal_naive_168h']:
             if model_name == 'lightgbm':
-                filtered = _filter_by_row_keys(target_frame, common_keys)
-                if 'row_key' in filtered.columns:
-                    filtered = filtered.drop(columns=['row_key'], errors='ignore')
-                actual = filtered['target_departures']
-                prediction = filtered['target_departures']
+                actual = lightgbm_joined['target_departures']
+                prediction = lightgbm_joined['y_pred']
             else:
                 lag_column = {'naive_1h': 'demand_lag_1h', 'seasonal_naive_24h': 'demand_lag_24h', 'seasonal_naive_168h': 'demand_lag_168h'}[model_name]
                 candidate = target_frame.copy()
@@ -797,8 +874,8 @@ def generate_benchmark_v2(root_dir: Path | None = None) -> dict[str, Any]:
                 'mae': metric_values['mae'],
                 'rmse': metric_values['rmse'],
                 'r2': metric_values['r2'],
-                'n_predictions': int(metric_values['n_predictions']),
-                'coverage': float(metric_values['n_predictions'] / len(common_keys)) if common_keys else 0.0,
+                'n_predictions': int(metric_values['n_predictions'] or 0),
+                'coverage': float(int(metric_values['n_predictions'] or 0) / len(target_keys)) if target_keys else 0.0,
                 'common_population_rows': len(common_keys),
                 'target_rows': len(target_keys),
                 'percentage_of_total_target_population': float(len(common_keys) / len(target_keys)) if target_keys else 0.0,
@@ -809,12 +886,13 @@ def generate_benchmark_v2(root_dir: Path | None = None) -> dict[str, Any]:
             'common_population_rows': len(common_keys),
             'common_population_coverage': float(len(common_keys) / len(target_keys)) if target_keys else 0.0,
             'percentage_of_total_target_population': float(len(common_keys) / len(target_keys)) if target_keys else 0.0,
-            'common_population_hash': _row_key_hash({tuple(key.split('\x1f')) for key in common_keys}),
+            'common_population_hash': _row_key_hash({_deserialize_row_key(key) for key in common_keys}),
             'all_models_share_same_population': all_equal,
             'metrics': metrics,
             'model_rows': {key: len(value) for key, value in model_rows.items()},
             'stage_diagnostics': stage_diagnostics,
         }
+        summary['dataset_artifact_hashes'][horizon_key] = dataset_hash
 
         horizon_root = output_root / f'{horizon}m'
         horizon_root.mkdir(parents=True, exist_ok=True)
@@ -825,6 +903,7 @@ def generate_benchmark_v2(root_dir: Path | None = None) -> dict[str, Any]:
             'model_class': 'lightgbm.LGBMRegressor',
             'random_seed': 42,
             'dataset_contract_hash': dataset_contract_hash,
+            'forecasting_dataset_hash': dataset_hash,
             'canonical_data_hash': canonical_data_hash,
             'common_population_rows': len(common_keys),
             'common_population_coverage': float(len(common_keys) / len(target_keys)) if target_keys else 0.0,
@@ -834,12 +913,10 @@ def generate_benchmark_v2(root_dir: Path | None = None) -> dict[str, Any]:
 
         for model_name in ['lightgbm', 'naive_1h', 'seasonal_naive_24h', 'seasonal_naive_168h']:
             if model_name == 'lightgbm':
-                frame = _filter_by_row_keys(target_frame, common_keys)
-                frame['residual'] = frame['target_departures'] - frame['target_departures']
-                frame['model'] = 'lightgbm_regressor'
-                frame['y_true'] = frame['target_departures']
-                frame['y_pred'] = frame['target_departures']
-                output = frame[['station_id', 'feature_timestamp', 'target_timestamp', 'y_true', 'y_pred', 'residual', 'horizon_minutes', 'model', 'split']].copy()
+                output = lightgbm_common[row_columns + ['y_true', 'y_pred']].copy()
+                output['residual'] = output['y_true'] - output['y_pred']
+                output['model'] = 'lightgbm_regressor'
+                output = output[['station_id', 'feature_timestamp', 'target_timestamp', 'y_true', 'y_pred', 'residual', 'horizon_minutes', 'model', 'split']]
             else:
                 lag_column = {'naive_1h': 'demand_lag_1h', 'seasonal_naive_24h': 'demand_lag_24h', 'seasonal_naive_168h': 'demand_lag_168h'}[model_name]
                 candidate = target_frame.copy()
@@ -1011,8 +1088,16 @@ def get_model_feature_columns(columns: Iterable[str]) -> list[str]:
         'day_of_week',
         'day_of_month',
         'month',
+        'local_hour',
+        'hour_sin',
+        'hour_cos',
+        'local_weekday',
+        'weekday_sin',
+        'weekday_cos',
+        'month_sin',
+        'month_cos',
+        'year',
         'weekend',
-        'horizon_minutes',
     }
     for column in columns:
         if column in FORBIDDEN_FEATURES:
@@ -1035,7 +1120,7 @@ def _safe_float(value: object) -> float | None:
     if pd.isna(value):
         return None
     try:
-        return float(value)
+        return float(str(value))
     except (TypeError, ValueError):
         return None
 
@@ -1250,13 +1335,13 @@ def run_experiment(root_dir: Path | None = None) -> dict[str, Any]:
             },
             'dataset_contract_hash': _sha256_file(datasets_dir / 'forecasting_contract.json'),
             'forecasting_dataset_hash': _sha256_file(dataset_path),
-            'canonical_data_hash': '0a747a132ab6401621df226d96e155b0dbf435d5992bb78e35e3c9461f24e288',
+            'canonical_data_hash': AUTHORITATIVE_GOLD_HASH,
             'best_iteration': training_metadata['best_iteration'],
             'training_time_seconds': training_metadata['training_time_seconds'],
             'prediction_time_seconds': metrics['prediction_time_seconds'],
         }
         metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + '\n', encoding='utf-8')
-        feature_importance = {'feature_importance': []}
+        feature_importance: dict[str, list[Any]] = {'feature_importance': []}
         feature_importance_path.write_text(json.dumps(feature_importance, indent=2, sort_keys=True) + '\n', encoding='utf-8')
         summary['horizons'].append({
             'horizon_minutes': horizon,
@@ -1287,6 +1372,10 @@ def run_benchmark_audit(root_dir: Path | None = None) -> dict[str, Any]:
 
 def _main() -> None:
     run_benchmark_audit()
+    summary = generate_benchmark_v2()
+    print(f"benchmark_v2: {summary['status']} / {summary['comparability']}")
+    if summary.get('status') != 'PASS' or summary.get('comparability') != 'COMPARABLE':
+        raise SystemExit(2)
 
 
 if __name__ == '__main__':

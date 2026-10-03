@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -45,17 +46,28 @@ class TripRecord:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-class MobilityProvider:
+class MobilityProvider(ABC):
+    """Legacy live-feed contract; batch trip adapters live in providers.registry.
+
+    Unsupported operations must be implemented explicitly, never represented as
+    a successful empty data feed.
+    """
     name: str = "base"
 
     def __init__(self, config: ProviderConfig | None = None) -> None:
         self.config = config or ProviderConfig(provider=self.name)
 
+    @abstractmethod
     def list_stations(self) -> list[Station]:
-        return []
+        """Return source station metadata, preserving provider identifiers."""
+        raise NotImplementedError
 
+    @abstractmethod
     def fetch_station_observations(self) -> list[StationObservation]:
-        return []
+        """Return observed inventories; unknown values remain missing."""
+        raise NotImplementedError
 
+    @abstractmethod
     def fetch_trips(self) -> list[TripRecord]:
-        return []
+        """Return journeys with their independent origin/destination timestamps."""
+        raise NotImplementedError

@@ -6,13 +6,17 @@ from datetime import datetime
 
 import psycopg
 
+# Identity of the archived BiciMAD benchmark, not a constraint on new providers.
+# Current trip-to-web publication uses actual source hashes and network batches.
 AUTHORITATIVE_GOLD_HASH = '0a747a132ab6401621df226d96e155b0dbf435d5992bb78e35e3c9461f24e288'
 SOURCE_NAME = 'bicimad_historical_trips'
 
 
 @dataclass(frozen=True)
 class ObservationKey:
-    station_id: str
+    provider_id: str
+    network_id: str
+    station_instance_id: str
     observed_at: datetime
 
 
@@ -27,36 +31,45 @@ class CanonicalDemandStore:
         unique_keys = list(dict.fromkeys(keys))
         if not unique_keys:
             return {}
-        values = [(key.station_id, key.observed_at) for key in unique_keys]
+        values = [(key.provider_id, key.network_id, key.station_instance_id, key.observed_at) for key in unique_keys]
         with self.connection.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT station_id, observed_at, demand
+                SELECT provider_id, network_id, station_instance_id, observed_at, demand
                 FROM demand_observations
                 WHERE source_name = %s
-                  AND (station_id, observed_at) IN (SELECT * FROM UNNEST(%s::text[], %s::timestamptz[]))
+                  AND batch_id = (SELECT batch_id FROM active_dataset_version WHERE singleton_id = 1)
+                  AND (provider_id, network_id, station_instance_id, observed_at)
+                      IN (SELECT * FROM UNNEST(%s::text[], %s::text[], %s::text[], %s::timestamptz[]))
                 """,
-                (self.source_name, [item[0] for item in values], [item[1] for item in values]),
+                (self.source_name, *[[item[index] for item in values] for index in range(4)]),
             )
             return {
-                ObservationKey(str(station_id), observed_at): float(demand)
-                for station_id, observed_at, demand in cursor.fetchall()
+                ObservationKey(str(provider_id), str(network_id), str(instance_id), observed_at): float(demand)
+                for provider_id, network_id, instance_id, observed_at, demand in cursor.fetchall()
             }
 
     def get_metadata(self) -> dict[str, object]:
         with self.connection.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT COUNT(*), COUNT(DISTINCT station_id), MIN(observed_at), MAX(observed_at)
+                SELECT COUNT(*), COUNT(DISTINCT station_instance_id), MIN(observed_at), MAX(observed_at)
                 FROM demand_observations
                 WHERE source_name = %s
+                  AND batch_id = (SELECT batch_id FROM active_dataset_version WHERE singleton_id = 1)
+                  AND provider_id IS NOT NULL AND network_id IS NOT NULL AND station_instance_id IS NOT NULL
                 """,
                 (self.source_name,),
             )
-            row_count, station_count, min_timestamp, max_timestamp = cursor.fetchone()
+            row = cursor.fetchone()
+        if row is None:
+            row_count, station_count, min_timestamp, max_timestamp = 0, 0, None, None
+        else:
+            row_count, station_count, min_timestamp, max_timestamp = row
         return {
             'table': 'demand_observations',
             'source_name': self.source_name,
+            'active_batch_id': self._active_batch_id(),
             'authoritative_gold_hash': AUTHORITATIVE_GOLD_HASH,
             'row_count': row_count,
             'station_count': station_count,
@@ -64,7 +77,18 @@ class CanonicalDemandStore:
             'max_timestamp': max_timestamp.isoformat() if max_timestamp else None,
         }
 
+    def _active_batch_id(self) -> str | None:
+        with self.connection.cursor() as cursor:
+            cursor.execute('SELECT batch_id FROM active_dataset_version WHERE singleton_id = 1')
+            row = cursor.fetchone()
+        return str(row[0]) if row else None
+
     def assert_validated(self) -> None:
+        """Validate the published batch against its manifest, not historical row totals."""
         metadata = self.get_metadata()
-        if metadata['row_count'] != 7_977_034 or metadata['station_count'] != 3_174:
-            raise RuntimeError(f'Canonical DB metadata does not match validated Gold: {metadata}')
+        with self.connection.cursor() as cursor:
+            cursor.execute('SELECT status, expected_rows FROM ingestion_batches WHERE batch_id = %s',
+                           (metadata['active_batch_id'],))
+            batch = cursor.fetchone()
+        if not batch or batch[0] != 'published' or not metadata['row_count'] or metadata['row_count'] != batch[1]:
+            raise RuntimeError(f'Canonical DB metadata does not match its published batch: {metadata}')

@@ -1,24 +1,16 @@
-# Legal and attribution
+# Licensing and attribution
 
-## Project identity
+## Project identity and code
 
-Mobility Intelligence Platform is an independent project. BiciMAD, EMT Madrid and Madrid City Council are not affiliated with or endorsing this project.
+Mobility Intelligence Platform is an independent project. BiciMAD, EMT Madrid and Madrid City Council are not affiliated with or endorsing it. The repository's source code is distributed under the [MIT license](../LICENSE).
 
-## Code license
+## Data credits
 
-The source code in this repository is distributed under the MIT license.
+- **BiciMAD trips and station information:** EMT Madrid / Madrid City Council open data. See the [historical dataset](https://datos.madrid.es/dataset/900034-0-bicimad-viajes-estaciones) and [station catalogue](https://datos.madrid.es/dataset/208327-0-transporte-bicicletas-bicimad). Provider terms and attribution requirements apply independently of the code license.
+- **Historical weather:** Open-Meteo and Copernicus ERA5. The project's weather metadata records CC BY 4.0 and source attribution. See the [historical weather documentation](https://open-meteo.com/en/docs/historical-weather-api).
 
-## Third-party data licensing
+Retain source credits with analyses and visualisations. Verify the applicable provider terms before redistributing raw or derived data; the code's MIT license does not license third-party datasets.
 
-The BiciMAD datasets used by this project are third-party open data provided by Madrid open-data sources. Their use is subject to the provider's terms, attribution requirements, and applicable legal conditions.
+## Publication boundaries
 
-Official references:
-- https://datos.gob.es/es/catalogo/l01280796-historicos-de-bicimad-2017-20231
-- https://datos.madrid.es/dataset/900034-0-bicimad-viajes-estaciones
-- https://datos.madrid.es/dataset/208327-0-transporte-bicicletas-bicimad
-
-The project does not claim official affiliation with BiciMAD, EMT Madrid, the Madrid City Council, or the dataset owners. The project documents the official sources and uses explicit direct URLs configured in the provider configuration.
-
-## Data source obligations
-
-Users must verify the provider terms for redistribution, reuse, or publication before using the raw datasets beyond the required analytical processing workflow.
+Original archives, generated datasets and model artifacts are excluded from Git. The website publishes aggregate activity and model results rather than user identifiers or individual journeys. Attribution and usage conditions still apply when generated exports are bundled into a published website.

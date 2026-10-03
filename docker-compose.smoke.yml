@@ -1,0 +1,4 @@
+# Explicit synthetic integration test. Always use a separate Compose project.
+services:
+  pipeline:
+    command: ["python", "scripts/smoke_pipeline.py"]

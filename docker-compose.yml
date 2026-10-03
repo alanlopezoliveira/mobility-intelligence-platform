@@ -1,16 +1,17 @@
 services:
   db:
     image: postgis/postgis:16-3.4
+    restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-mobility}
       POSTGRES_USER: ${POSTGRES_USER:-mobility_user}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:${DATABASE_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-mobility_user} -d $${POSTGRES_DB:-mobility}"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -19,29 +20,56 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      target: runtime
+    restart: unless-stopped
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql://mobility_user:change_me@db:5432/mobility}
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
       PERSIST_TO_DATABASE: "true"
       API_HOST: 0.0.0.0
       API_PORT: 8000
+      DEFAULT_PROVIDER: ${DEFAULT_PROVIDER:-bicimad}
     depends_on:
       db:
         condition: service_healthy
     ports:
-      - "8000:8000"
+      - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
     volumes:
-      - .:/app
-      - ./data:/app/data
-      - ./models:/app/models
+      - pipeline-data:/app/data
+      - pipeline-models:/app/models
+
+  pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: pipeline
+    command: ["python", "scripts/rebuild_project.py", "--download", "--publish-database", "--provider", "${DEFAULT_PROVIDER:-bicimad}"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
+    depends_on:
+      backend:
+        condition: service_healthy
+    volumes:
+      - pipeline-data:/app/data
+      - pipeline-models:/app/models
+      - web-exports:/app/frontend/public
 
   frontend:
-    image: node:22-alpine
-    working_dir: /app/frontend
-    command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 3000"
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+      pipeline:
+        condition: service_completed_successfully
     ports:
-      - "3000:3000"
+      - "${WEB_BIND_ADDRESS:-127.0.0.1}:${FRONTEND_PORT:-3000}:80"
     volumes:
-      - ./frontend:/app/frontend
+      - web-exports:/srv/exports:ro
 
 volumes:
   pgdata:
+  pipeline-data:
+  pipeline-models:
+  web-exports:

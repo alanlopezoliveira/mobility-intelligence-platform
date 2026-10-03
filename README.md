@@ -1,65 +1,130 @@
 # Mobility Intelligence Platform
 
-Mobility Intelligence Platform is an independent project for shared-mobility intelligence. BiciMAD is the initial real-world provider used to validate the platform, not the product identity.
+**MobilityLab** analyzes historical bike-sharing trips, with BiciMAD Madrid as its reference provider and configurable CSV adapters for other providers. It combines historical trips, weather analysis and station-level departure forecasts in an interactive web application.
 
-This repository intentionally does not include the real BiciMAD dataset. A fresh clone only contains source code, configuration, tests, documentation, notebooks, Docker files, and CI files. The user must explicitly run the data preparation workflow to download and prepare provider data locally.
+The main analysis covers **2022**. Separate inventory views explore available station observations from **2018–2020**. All results are historical research: the application does not provide live bike availability or automated redistribution decisions.
 
-## Clean-clone workflow
+## What you can explore
 
-```bash
-git clone <repo-url>
-cd mobility-intelligence-platform
-cp .env.example .env
-docker compose up -d
-docker compose exec backend make prepare-data
-docker compose exec backend make train
-docker compose exec backend make evaluate
+| Feature | What it shows |
+|---|---|
+| Network overview | Recorded trips, station coverage and activity over time |
+| Weather and usage | Rainy versus dry hours, with calendar-matched comparisons |
+| Forecast explorer | Predicted and observed departures by station, at +60 and +120 minutes |
+| Model comparison | Seven trained model families and three simple reference methods |
+| Station inventory | Historical occupancy and observed empty/full events |
+| Data and methods | Sources, quality checks, assumptions and limitations |
+
+Forecasts are evaluated on a chronological split. Model selection uses validation error and a preference for simpler candidates with similar accuracy. The [model comparison](docs/model-comparison.md) contains the published results and selection details.
+
+## Technology
+
+- **Data and modelling:** Python, pandas, scikit-learn, LightGBM, XGBoost and CatBoost.
+- **Interface:** React, TypeScript and Vite, reading generated JSON exports.
+- **Optional database explorer:** FastAPI, PostgreSQL/PostGIS, SQLAlchemy and Docker Compose.
+
+The local web application can run from static exports. The complete Docker workflow additionally publishes observations to PostgreSQL and serves the API; archived BiciMAD benchmarks remain a separate reference workflow.
+
+## Run the complete workflow in Docker
+
+Copy `.env.example` to `.env`, set a database password and matching `DATABASE_URL`, then run:
+
+```powershell
+docker compose up --build -d
+docker compose logs -f pipeline
 ```
 
-## Important data rule
+Open [MobilityLab](http://localhost:3000). The batch container downloads the configured trip archive, prepares weather and models, publishes provider-specific exports and database observations, then allows the frontend to start. First execution needs internet and sufficient time for ingestion/training. Four named volumes retain data, models, exports and PostgreSQL. See the [developer guide](docs/developer-guide.md) for refresh commands, ports, optional inventory, storage and external hosting.
 
-The repository does not contain the official BiciMAD historical data, raw exports, generated Bronze/Silver/Gold data, database dumps, trained model artifacts, or any real production fixtures. Those files are generated locally after the explicit preparation step and are git-ignored.
+Other providers can supply mapped CSV/ZIP data through [provider configuration](docs/providers.md). The web selector switches between published provider/network/year datasets. Support is tested with two synthetic providers; a real source still requires validation of its schema and semantics.
 
-The station-master preparation workflow persists normalized stations in PostgreSQL/PostGIS through Alembic-managed tables. The current station-master resource is a snapshot without timestamped demand observations, so forecasting training and evaluation deliberately stop with `not_evaluable`. The previous same-snapshot `MAE=0.0111` and `R²=0.9998` result is invalid because the target was constructed directly from the feature snapshot. A validated forecast model requires timestamped observations and chronological train/validation/test periods.
+## Run locally
 
-## Official BiciMAD sources used by the project
+### 1. Prepare the environment
 
-Historical trip/station dataset (2017-2023):
-- 2017: https://media.emtmadrid.es/-HoGTStPZeC
-- 2018: https://media.emtmadrid.es/-9iZNUjrjri
-- 2019: https://media.emtmadrid.es/-WNgfSj2ZvC
-- 2020: https://media.emtmadrid.es/-rkuBymuFJX
-- 2021: https://media.emtmadrid.es/-BRk4rTaAdV
-- 2022: https://media.emtmadrid.es/-uHaW6iZkhG
-- 2023: https://media.emtmadrid.es/-9Nii5DXo4x
+Use Python 3.12 and Node.js 22, matching the project's CI versions. From the repository root, on Windows:
 
-Official catalog references:
-- https://datos.gob.es/es/catalogo/l01280796-historicos-de-bicimad-2017-20231
-- https://datos.madrid.es/dataset/900034-0-bicimad-viajes-estaciones
-
-BiciMAD station master resource (explicit direct CSV URL configured in config/providers/bicimad.yaml):
-- https://datos.madrid.es/dataset/208327-0-transporte-bicicletas-bicimad/resource/208327-2-transporte-bicicletas-bicimad/download/208327-2-transporte-bicicletas-bicimad.csv
-
-This project documents the sources and uses only the explicit direct URLs configured in the provider configuration. Runtime discovery is not used.
-
-## Architecture
-
-The project uses a modular monolith with clear domain boundaries: core, provider adapters, ingestion, transformations, data quality, ML, API, CLI, SDK, frontend, and infrastructure.
-
-## Commands
-
-```bash
-make prepare-data
-make train
-make evaluate
-make test
-make clean-data
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -c constraints-rebuilt.txt -e ".[dev,research]"
 ```
 
-## Licensing and attribution
+On Linux/macOS, activate the environment with `source .venv/bin/activate`. Installation and the first weather retrieval need internet access.
 
-The code is MIT licensed. The BiciMAD datasets are third-party data and are subject to their own terms and attribution requirements. See docs/legal-and-attribution.md.
+### 2. Prepare the source archives
 
-The project includes a legal notice:
+Create `data/bronze/historical/` and save the official distributions with these filenames:
 
-> Mobility Intelligence Platform is an independent project. BiciMAD, EMT Madrid and Madrid City Council are not affiliated with or endorsing this project.
+| Archive | Local filename | Purpose |
+|---|---|---|
+| [BiciMAD 2022](https://media.emtmadrid.es/-uHaW6iZkhG) | `2022.zip` | Reference trip dataset |
+| [BiciMAD 2018](https://media.emtmadrid.es/-9iZNUjrjri) | `2018.zip` | Historical station snapshots |
+| [BiciMAD 2019](https://media.emtmadrid.es/-WNgfSj2ZvC) | `2019.zip` | Historical station snapshots |
+| [BiciMAD 2020](https://media.emtmadrid.es/-rkuBymuFJX) | `2020.zip` | Historical station snapshots |
+
+The rebuild extracts monthly trip CSVs automatically. Only the 2022 archive is required for the default trip workflow; `--download` retrieves it automatically. Historical inventory is optional through `--inventory` and needs the 2018–2020 archives plus a RAR-capable extractor.
+
+### 3. Generate results and start the frontend
+
+With the Python environment active:
+
+```powershell
+python scripts/rebuild_project.py
+cd frontend
+npm ci
+npm run dev -- --host 127.0.0.1 --port 5177 --strictPort
+```
+
+Open [MobilityLab](http://127.0.0.1:5177). Later rebuilds reuse verified caches and unchanged model artifacts.
+
+Prepare inventory pages with `python scripts/rebuild_project.py --download --inventory`. This exports snapshots independently of the older Gold/benchmark files. See the [developer guide](docs/developer-guide.md#optional-bicimad-inventory).
+
+To build and preview the main frontend, run these commands from `frontend/` after preparing the exports:
+
+```powershell
+npm run build
+npm run preview -- --host 127.0.0.1 --port 4173
+```
+
+## Project structure
+
+```text
+config/       Source configuration and historical assessment inputs
+src/          Data ingestion, modelling, API and database modules
+scripts/      Data preparation, evaluation and export commands
+frontend/     Web application
+alembic/      Database migrations for the optional explorer
+tests/        Automated checks
+docs/         Maintained guides, course submissions and illustrations
+data/         Local source files and generated datasets (ignored by Git)
+models/       Local trained models and evaluation artifacts (ignored by Git)
+```
+
+The BiciMAD prepared tables live in `data/rebuilt/2022/`; other networks use their provider workspace. Models live in `models/providers/<provider>/<network>/<year>/` and web exports in `frontend/public/project-data/providers/<provider>/<network>/<year>/`. Downloaded archives and generated results are not included in a fresh checkout.
+
+## Validation
+
+From the repository root, with the Python environment active:
+
+```powershell
+python -m pytest -q
+ruff check src tests
+mypy src
+```
+
+From `frontend/`, run `npm run lint` and `npm run build`. An independent trip recount is available through `python scripts/verify_trip_counts.py` after data preparation. To refresh the model comparison from existing results without retraining, run `python scripts/document_model_comparison.py`.
+
+## Reading the results
+
+Predictions estimate **recorded departures per station-hour**, not available bicycles or unmet demand. Zero-filled station-hours mean no recorded movement during an observed network hour; hours without network coverage remain unknown. A seven-day chart combines separate hourly forecasts, not a single seven-day forecast.
+
+Weather comparisons describe associations, not causal effects. Inventory observations cover a different period from the forecasts. The historical test period has been examined in previous iterations, so the reported scores are not a fresh prospective validation.
+
+## Documentation and credits
+
+Start with the [documentation index](docs/README.md), [data and methods](docs/rebuilt-project.md), or [course submissions](docs/entregas/README.md).
+
+**Author:** Alan López Oliveira.
+
+The source code uses the [MIT license](LICENSE). Data credits belong to EMT Madrid / Madrid City Council and Open-Meteo / Copernicus ERA5; their usage conditions are covered in [licensing and attribution](docs/legal-and-attribution.md). This project is independent of BiciMAD, EMT Madrid and Madrid City Council.

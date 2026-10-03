@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import os
 from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
+from src.config.settings import normalize_database_url
 from src.db.models import Base
 
 config = context.config
+database_url = os.getenv('DATABASE_URL')
+if database_url:
+    # Alembic uses ConfigParser interpolation, so percent-encoded credentials need escaping.
+    config.set_main_option('sqlalchemy.url', normalize_database_url(database_url).replace('%', '%%'))
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 

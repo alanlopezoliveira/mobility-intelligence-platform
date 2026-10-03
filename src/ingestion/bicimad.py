@@ -17,15 +17,23 @@ from pathlib import Path, PurePosixPath
 import pandas as pd
 import rarfile
 import requests
-from sqlalchemy import delete
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from src.config.settings import load_provider_config
 from src.db.database import SessionLocal
-from src.db.models import DemandObservation, HistoricalStationSnapshot
+from src.db.models import (
+    ActiveDatasetVersion,
+    DemandObservation,
+    HistoricalStationSnapshot,
+    IngestionBatch,
+    NetworkDatasetVersion,
+    StationInstance,
+)
 
 REQUEST_TIMEOUT = (20, 180)
 BUCKET_MINUTES = 60
-LOCAL_TIMEZONE = 'Europe/Madrid'
+PROVIDER_METADATA = load_provider_config()
+LOCAL_TIMEZONE = PROVIDER_METADATA.timezone
 MAX_NESTED_ZIP_DEPTH = 4
 
 
@@ -110,7 +118,9 @@ def _download_outer_archive(year: int, url: str) -> Path:
     destination = Path('data/bronze/historical') / f'{year}.zip'
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists() and zipfile.is_zipfile(destination):
+        _write_archive_manifest(destination, year, url, retrieved_at=None)
         return destination
+    retrieved_at = datetime.now(UTC)
     temporary = destination.with_suffix('.zip.partial')
     existing_size = temporary.stat().st_size if temporary.exists() else 0
     headers = {'Range': f'bytes={existing_size}-'} if existing_size else {}
@@ -126,7 +136,36 @@ def _download_outer_archive(year: int, url: str) -> Path:
     temporary.replace(destination)
     if not zipfile.is_zipfile(destination):
         raise ValueError(f'Downloaded historical source is not a valid ZIP: {url}')
+    _write_archive_manifest(destination, year, url, retrieved_at=retrieved_at)
     return destination
+
+
+def _write_archive_manifest(path: Path, year: int, url: str, retrieved_at: datetime | None) -> None:
+    digest = hashlib.sha256()
+    with path.open('rb') as archive:
+        for chunk in iter(lambda: archive.read(1024 * 1024), b''):
+            digest.update(chunk)
+    manifest_path = path.with_suffix('.manifest.json')
+    existing: dict[str, object] = {}
+    if manifest_path.is_file():
+        try:
+            existing = json.loads(manifest_path.read_text(encoding='utf-8'))
+        except (OSError, json.JSONDecodeError):
+            existing = {}
+    manifest = {
+        'source_year': year,
+        'source_url': url,
+        'archive_path': str(path),
+        'archive_sha256': digest.hexdigest(),
+        'archive_size_bytes': path.stat().st_size,
+        'retrieved_at_utc': retrieved_at.isoformat() if retrieved_at else existing.get('retrieved_at_utc'),
+        'retrieval_time_known': retrieved_at is not None or existing.get('retrieval_time_known') is True,
+    }
+    if existing.get('archive_sha256') == manifest['archive_sha256'] and existing.get('source_url') == url:
+        return
+    temporary = manifest_path.with_suffix('.json.partial')
+    temporary.write_text(json.dumps(manifest, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+    temporary.replace(manifest_path)
 
 
 def _parse_datetime_details(value: object) -> tuple[datetime | None, str, str | None]:
@@ -206,14 +245,16 @@ def _legacy_json_trips(
                 stats.skipped_records += 1
             continue
         duration = record.get('travel_time')
-        ended = started + pd.to_timedelta(float(duration), unit='m').to_pytimedelta() if duration not in (None, '') else None
+        # Legacy starts are privacy-rounded to an hour. Duration is in seconds;
+        # it cannot reconstruct an exact arrival clock from that rounded start.
+        ended = None
         if stats:
             stats.parsed_records += 1
         trip_id = str(record.get('user_day_code') or record.get('_id', {}).get('$oid') or f'{year}-{member}-{index}')
         yield Trip(
             year, trip_id, started, ended, _station_id(origin), _station_id(destination),
-            float(duration) if duration not in (None, '') else None, member, started_raw, None,
-            started_resolution, 'not_required', provider, outer_archive,
+            float(duration) / 60 if duration not in (None, '') else None, member, started_raw, None,
+            started_resolution, 'unknown_from_hour_rounded_start', provider, outer_archive,
             f'{member_identity}:{trip_id}:{index}',
         )
 
@@ -405,89 +446,18 @@ def _looks_like_trip_json(data: bytes) -> bool:
 
 
 def parse_station_snapshot_json(data: bytes, year: int, member: str) -> pd.DataFrame:
-    """Parse the MongoDB-style station-state snapshots embedded in the official 2018-2019 historical .rar archives.
+    """Parse every inventory snapshot, preserving source time and service flags."""
+    from src.ingestion.snapshots import parse_snapshot_bytes
 
-    The real provider files store primitive integer values as `NumberInt(...)` / `NumberLong(...)` and wrap
-    a snapshot in an object like `{ "_id": ..., "stations": [...] }`. Some archive members are a single object,
-    while others contain multiple consecutive documents back-to-back; this helper normalizes both shapes to a
-    row-wise station dimension with stable canonical IDs and raw station metadata fields.
-    """
-    text = data.decode('utf-8-sig', 'replace')
-    normalized = re.sub(r'NumberInt\(([-+]?\d+)\)', r'\1', text)
-    normalized = re.sub(r'NumberLong\(([-+]?\d+)\)', r'\1', normalized)
-    normalized = re.sub(r'NumberDecimal\(([^)]+)\)', r'\1', normalized)
-
-    decoded: list[object] = []
-    decoder = json.JSONDecoder()
-    cursor = 0
-    while cursor < len(normalized):
-        while cursor < len(normalized) and normalized[cursor].isspace():
-            cursor += 1
-        if cursor >= len(normalized):
-            break
-        try:
-            value, end = decoder.raw_decode(normalized[cursor:])
-        except json.JSONDecodeError:
-            next_cursor = normalized.find('{', cursor + 1)
-            if next_cursor <= cursor:
-                break
-            cursor = next_cursor
-            continue
-        decoded.append(value)
-        cursor += end
-
-    if not decoded:
-        raise ValueError(f'{year}:{member}: invalid historical station snapshot JSON')
-
-    payload = decoded[0]
-    if len(decoded) > 1:
-        payload = decoded[0]
-
-    rows: list[dict[str, object]] = []
-    station_records: list[dict[str, object]]
-    if isinstance(payload, dict):
-        station_records = payload.get('stations') if isinstance(payload.get('stations'), list) else []
-    elif isinstance(payload, list):
-        station_records = payload
-    else:
-        station_records = []
-
-    for raw_record in station_records:
-        if not isinstance(raw_record, dict):
-            continue
-        station_id = raw_record.get('id')
-        if station_id in (None, ''):
-            station_id = raw_record.get('number') or raw_record.get('station_id')
-        if station_id in (None, ''):
-            continue
-
-        row: dict[str, object] = {
-            'station_id': _station_id(station_id),
-            'station_number': str(raw_record.get('number') or raw_record.get('station_number') or '').strip() or None,
-            'name': str(raw_record.get('name') or '').strip() or None,
-            'address': str(raw_record.get('address') or '').strip() or None,
-            'activate': raw_record.get('activate'),
-            'capacity': raw_record.get('total_bases') if raw_record.get('total_bases') not in (None, '') else raw_record.get('capacity'),
-            'available_bikes': raw_record.get('free_bases') if raw_record.get('free_bases') not in (None, '') else raw_record.get('available_bikes'),
-            'latitude': raw_record.get('latitude'),
-            'longitude': raw_record.get('longitude'),
-            'source_year': year,
-            'source_member': member,
-        }
-
-        row['capacity'] = pd.to_numeric(row['capacity'], errors='coerce') if row['capacity'] not in (None, '') else pd.NA
-        row['available_bikes'] = pd.to_numeric(row['available_bikes'], errors='coerce') if row['available_bikes'] not in (None, '') else pd.NA
-        row['latitude'] = pd.to_numeric(row['latitude'], errors='coerce') if row['latitude'] not in (None, '') else pd.NA
-        row['longitude'] = pd.to_numeric(row['longitude'], errors='coerce') if row['longitude'] not in (None, '') else pd.NA
-        rows.append(row)
-
-    if not rows:
-        return pd.DataFrame(columns=['station_id', 'station_number', 'name', 'address', 'activate', 'capacity', 'available_bikes', 'latitude', 'longitude', 'source_year', 'source_member'])
-
-    frame = pd.DataFrame(rows)
-    frame['station_id'] = frame['station_id'].astype(str)
-    frame['station_number'] = frame['station_number'].where(frame['station_number'].notna(), None)
-    frame['source_year'] = pd.to_numeric(frame['source_year'], errors='coerce').astype('Int64')
+    frame = parse_snapshot_bytes(data, member).rename(columns={
+        'station': 'station_id', 'time': 'observed_at', 'bikes': 'available_bikes',
+        'free': 'free_docks', 'active': 'activate', 'unavailable': 'no_available',
+    })
+    frame['source_year'] = year
+    frame['source_member'] = member
+    for column in ['available_bikes', 'free_docks', 'capacity', 'latitude', 'longitude']:
+        if column in frame:
+            frame[column] = pd.to_numeric(frame[column], errors='coerce')
     return frame
 
 
@@ -507,7 +477,7 @@ def _station_snapshot_rows_from_archive_payload(data: bytes, year: int, member: 
         return frame
     frame = frame.copy()
     frame['provider'] = 'bicimad'
-    frame['snapshot_period'] = frame['source_year'].astype(str) + '-01'
+    frame['snapshot_period'] = pd.to_datetime(frame['observed_at'], errors='raise').dt.strftime('%Y-%m')
     frame['source_archive'] = archive_name
     frame['source_member'] = member
     frame['source_path'] = f'{archive_name}/{member}'
@@ -536,6 +506,9 @@ def persist_historical_station_snapshots(frame: pd.DataFrame, source_name: str =
             record = {
                 'provider': str(row.get('provider') or 'bicimad'),
                 'station_id': str(row['station_id']),
+                'provider_id': str(row.get('provider') or PROVIDER_METADATA.provider).strip().lower(),
+                'network_id': PROVIDER_METADATA.network_id,
+                'station_instance_id': f"{str(row.get('provider') or PROVIDER_METADATA.provider).strip().lower()}:{PROVIDER_METADATA.network_id}:{row['station_id']!s}",
                 'snapshot_period': str(row['snapshot_period']),
                 'station_number': str(row['station_number']) if row.get('station_number') not in (None, '') else None,
                 'name': str(row['name']) if row.get('name') not in (None, '') else None,
@@ -552,7 +525,7 @@ def persist_historical_station_snapshots(frame: pd.DataFrame, source_name: str =
             }
             session.execute(
                 insert(HistoricalStationSnapshot).values(**record).on_conflict_do_nothing(
-                    index_elements=['provider', 'station_id', 'snapshot_period', 'source_member']
+                    index_elements=['provider_id', 'network_id', 'station_id', 'snapshot_period', 'source_member']
                 )
             )
             persisted += 1
@@ -591,8 +564,11 @@ def iter_historical_station_snapshots() -> tuple[pd.DataFrame, dict[str, object]
                 members = rar.infolist()
         except rarfile.RarCannotExec as exc:
             raise RuntimeError(f'{archive_name}:{member_name}: RAR extraction unavailable in runtime: {exc}') from exc
-        summary['archive_count'] = int(summary['archive_count']) + 1
-        summary['rar_member_count'] = int(summary['rar_member_count']) + 1
+        archive_count = summary['archive_count']
+        rar_member_count = summary['rar_member_count']
+        assert isinstance(archive_count, int) and isinstance(rar_member_count, int)
+        summary['archive_count'] = archive_count + 1
+        summary['rar_member_count'] = rar_member_count + 1
         for member in members:
             if member.filename.lower().endswith(('.json', '.txt', '.csv')):
                 data = rar.read(member)
@@ -788,18 +764,26 @@ def aggregate_trips(trips: Iterator[Trip]) -> tuple[pd.DataFrame, dict[str, int]
             continue
         bucket = trip.started_at.replace(minute=(trip.started_at.minute // BUCKET_MINUTES) * BUCKET_MINUTES, second=0, microsecond=0)
         origin_key = (bucket, trip.origin_station)
-        destination_key = (bucket, trip.destination_station)
-        for key, departures, arrivals in ((origin_key, 1, 0), (destination_key, 0, 1)):
+        events = [(origin_key, 1, 0)]
+        if trip.ended_at is not None:
+            arrival_bucket = trip.ended_at.replace(minute=(trip.ended_at.minute // BUCKET_MINUTES) * BUCKET_MINUTES, second=0, microsecond=0)
+            events.append(((arrival_bucket, trip.destination_station), 0, 1))
+        for key, departures, arrivals in events:
             entry = bucket_totals.setdefault(key, {
-                'timestamp': bucket,
+                'timestamp': key[0],
                 'station_id': key[1],
                 'departures': 0,
                 'arrivals': 0,
                 'source_year': trip.year,
             })
-            entry['departures'] = int(entry['departures']) + departures
-            entry['arrivals'] = int(entry['arrivals']) + arrivals
-            entry['source_year'] = min(int(entry['source_year']), trip.year)
+            current_departures = entry['departures']
+            current_arrivals = entry['arrivals']
+            source_year = entry['source_year']
+            assert isinstance(current_departures, int) and isinstance(current_arrivals, int)
+            assert isinstance(source_year, int)
+            entry['departures'] = current_departures + departures
+            entry['arrivals'] = current_arrivals + arrivals
+            entry['source_year'] = min(source_year, trip.year)
     if not bucket_totals:
         raise RuntimeError('No valid historical trips were parsed from configured sources')
 
@@ -849,28 +833,149 @@ def persist_demand(
         conflicting = duplicate_members[['timestamp', 'station_id']].drop_duplicates().sort_values(['timestamp', 'station_id']).head(10).to_dict(orient='records')
         raise ValueError(f'Duplicate canonical keys detected before persistence: {conflicting}')
 
-    total_rows = 0
-    for start in range(0, len(frame), batch_size):
-        batch = frame.iloc[start:start + batch_size]
-        records = batch.to_dict(orient='records')
+    provider_id = PROVIDER_METADATA.provider.lower()
+    network_id = PROVIDER_METADATA.network_id
+    records = []
+    station_ranges: dict[str, tuple[datetime, datetime]] = {}
+    digest = hashlib.sha256()
+    for record in frame.sort_values(['station_id', 'timestamp']).to_dict(orient='records'):
+        station_id = str(record['station_id'])
+        timestamp = record['timestamp'].to_pydatetime() if hasattr(record['timestamp'], 'to_pydatetime') else record['timestamp']
+        if timestamp.tzinfo is None:
+            raise ValueError('Canonical observation timestamps must be timezone-aware UTC instants')
+        timestamp = timestamp.astimezone(UTC)
+        station_instance_id = f'{provider_id}:{network_id}:{station_id}'
+        departures, arrivals = int(record['departures']), int(record['arrivals'])
+        total_activity, net_flow, demand = int(record['total_activity']), int(record['net_flow']), int(record['demand'])
+        if min(departures, arrivals) < 0 or total_activity != departures + arrivals or net_flow != arrivals - departures or demand != departures:
+            raise ValueError(f'Canonical count invariant failed for station {station_id} at {timestamp.isoformat()}')
+        original_time_text = str(record['timestamp'])
+        source_record_id = f'{station_instance_id}:{timestamp.isoformat()}'
+        row_hash_text = '|'.join((provider_id, network_id, station_instance_id, original_time_text, str(departures), str(arrivals), str(total_activity), str(net_flow), str(demand)))
+        source_record_hash = hashlib.sha256(row_hash_text.encode('utf-8')).hexdigest()
+        values = {
+            'station_id': station_id,
+            'provider_id': provider_id,
+            'network_id': network_id,
+            'station_instance_id': station_instance_id,
+            'observed_at': timestamp,
+            'departures': departures,
+            'arrivals': arrivals,
+            'total_activity': total_activity,
+            'net_flow': net_flow,
+            'demand': float(demand),
+            'source_name': source_name,
+            'source_record_id': source_record_id,
+            'source_record_hash': source_record_hash,
+            'original_time_text': original_time_text,
+        }
+        digest.update(row_hash_text.encode('utf-8'))
+        digest.update(b'\n')
+        records.append(values)
+        first, last = station_ranges.get(station_instance_id, (timestamp, timestamp))
+        station_ranges[station_instance_id] = (min(first, timestamp), max(last, timestamp))
+
+    content_hash = digest.hexdigest()
+    batch_id = content_hash
+    archive_manifest = []
+    bronze = Path('data/bronze/historical')
+    for manifest_path in sorted(bronze.glob('*.manifest.json')):
+        archive_manifest.append(json.loads(manifest_path.read_text(encoding='utf-8')))
+    manifest_json = json.dumps({
+        'canonical_rows_sha256': content_hash,
+        'expected_rows': len(records),
+        'source_archives': archive_manifest,
+        'provider_id': provider_id,
+        'network_id': network_id,
+        'provider_timezone': PROVIDER_METADATA.timezone,
+    }, sort_keys=True)
+    with session_factory.begin() as session:
+        existing = session.execute(
+            select(IngestionBatch).where(IngestionBatch.batch_id == batch_id)
+        ).scalar_one_or_none()
+        if existing is not None and existing.status == 'published':
+            return len(records)
+        if existing is None:
+            session.add(IngestionBatch(
+                batch_id=batch_id,
+                source_name=source_name,
+                content_sha256=content_hash,
+                source_manifest_json=manifest_json,
+                expected_rows=len(records),
+                status='loading',
+                created_at=datetime.now(UTC),
+                published_at=None,
+            ))
+        else:
+            existing.status = 'loading'
+            existing.expected_rows = len(records)
+            existing.source_manifest_json = manifest_json
+            existing.published_at = None
+        for instance_id, (first_seen, last_seen) in station_ranges.items():
+            session.execute(insert(StationInstance).values(
+                station_instance_id=instance_id,
+                provider_id=provider_id,
+                network_id=network_id,
+                provider_station_id=instance_id.rsplit(':', 1)[-1],
+                valid_from=first_seen,
+                valid_to=last_seen + timedelta(minutes=BUCKET_MINUTES),
+                identity_provenance='Source station ID instance; physical-place continuity is not asserted.',
+            ).on_conflict_do_nothing(index_elements=['station_instance_id']))
+        # Only rows from this inactive content-addressed batch can be replaced on retry.
+        session.execute(delete(DemandObservation).where(DemandObservation.batch_id == batch_id))
+        for start in range(0, len(records), batch_size):
+            batch_values = [{**record, 'batch_id': batch_id} for record in records[start:start + batch_size]]
+            session.execute(insert(DemandObservation), batch_values)
+
+    try:
         with session_factory.begin() as session:
-            if start == 0:
-                session.execute(delete(DemandObservation).where(DemandObservation.source_name == source_name))
-            for record in records:
-                values = {
-                    'station_id': str(record['station_id']),
-                    'observed_at': record['timestamp'].to_pydatetime() if hasattr(record['timestamp'], 'to_pydatetime') else record['timestamp'],
-                    'departures': int(record['departures']),
-                    'arrivals': int(record['arrivals']),
-                    'total_activity': int(record['total_activity']),
-                    'net_flow': int(record['net_flow']),
-                    'demand': float(record['demand']),
-                    'source_name': source_name,
-                }
-                statement = insert(DemandObservation).values(**values).on_conflict_do_update(
-                    constraint='uq_demand_station_time',
-                    set_=values,
+            persisted = session.execute(
+                select(func.count()).select_from(DemandObservation).where(DemandObservation.batch_id == batch_id)
+            ).scalar_one()
+            invalid = session.execute(
+                select(func.count()).select_from(DemandObservation).where(
+                    DemandObservation.batch_id == batch_id,
+                    (DemandObservation.departures < 0)
+                    | (DemandObservation.arrivals < 0)
+                    | (DemandObservation.total_activity != DemandObservation.departures + DemandObservation.arrivals)
+                    | (DemandObservation.net_flow != DemandObservation.arrivals - DemandObservation.departures)
+                    | (DemandObservation.demand != DemandObservation.departures)
+                    | (func.length(DemandObservation.source_record_hash) != 64),
                 )
-                session.execute(statement)
-        total_rows += len(records)
-    return total_rows
+            ).scalar_one()
+            if persisted != len(records) or invalid:
+                session.execute(
+                    select(IngestionBatch).where(IngestionBatch.batch_id == batch_id).with_for_update()
+                ).scalar_one().status = 'failed'
+                raise RuntimeError('Persisted demand batch failed count or invariant validation; active version unchanged')
+            session.execute(
+                select(IngestionBatch).where(IngestionBatch.batch_id == batch_id).with_for_update()
+            ).scalar_one().status = 'validated'
+
+        with session_factory.begin() as session:
+            batch = session.execute(
+                select(IngestionBatch).where(IngestionBatch.batch_id == batch_id).with_for_update()
+            ).scalar_one()
+            if batch.status != 'validated':
+                raise RuntimeError('Only a validated demand batch may be published')
+            session.execute(insert(ActiveDatasetVersion).values(
+                singleton_id=1, batch_id=batch_id
+            ).on_conflict_do_update(
+                index_elements=['singleton_id'], set_={'batch_id': batch_id}
+            ))
+            batch.status = 'published'
+            batch.published_at = datetime.now(UTC)
+            session.execute(insert(NetworkDatasetVersion).values(
+                provider_id=provider_id, network_id=network_id, batch_id=batch_id,
+            ).on_conflict_do_update(
+                index_elements=['provider_id', 'network_id'], set_={'batch_id': batch_id},
+            ))
+    except Exception:
+        with session_factory.begin() as session:
+            batch = session.execute(
+                select(IngestionBatch).where(IngestionBatch.batch_id == batch_id).with_for_update()
+            ).scalar_one_or_none()
+            if batch is not None and batch.status == 'loading':
+                batch.status = 'failed'
+        raise
+    return len(records)

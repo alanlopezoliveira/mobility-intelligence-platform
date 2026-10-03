@@ -12,3 +12,7 @@ frontend/dist/
 data/
 models/
 *.pyc
+.test-tmp/
+frontend/public/project-data/
+frontend/public/audit-data/
+frontend/public/analysis-data/

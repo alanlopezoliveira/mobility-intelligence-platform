@@ -1,5 +1,8 @@
 provider: bicimad
 name: BiciMAD
+network_id: madrid
+timezone: Europe/Madrid
+calendar_version: madrid-weekdays-v1
 source_name: bicimad_historical_trips
 catalog_url: https://datos.gob.es/es/catalogo/l01280796-historicos-de-bicimad-2017-20231
 source_license_or_terms: "Third-party open-data terms apply; verify the specific provider terms before reuse."

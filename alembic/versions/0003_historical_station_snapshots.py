@@ -1,12 +1,12 @@
 """Add historical station snapshot table.
 
-Revision ID: 0003_historical_station_snapshots
+Revision ID: 0003_station_snapshots
 Revises: 0002_demand_trip_counts
 """
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0003_historical_station_snapshots"
+revision = "0003_station_snapshots"
 down_revision = "0002_demand_trip_counts"
 branch_labels = None
 depends_on = None

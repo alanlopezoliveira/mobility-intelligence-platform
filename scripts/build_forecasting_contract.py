@@ -4,7 +4,6 @@ import argparse
 import gzip
 import hashlib
 import json
-import os
 import subprocess
 import sys
 import tempfile
@@ -17,6 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.ml.canonical_demand_store import AUTHORITATIVE_GOLD_HASH
+from src.config.settings import DatabaseSettings, normalize_database_url
 from src.ml.canonical_forecast_builder import (
     DATASET_COLUMNS,
     SOURCE_NAME,
@@ -30,9 +30,7 @@ from src.ml.forecast_contract_readiness import (
 )
 
 OUTPUT = ROOT / 'data' / 'gold' / 'forecasting'
-DATABASE_URL = os.environ.get(
-    'DATABASE_URL', 'postgresql://mobility_user:change_me@localhost:5432/mobility'
-)
+DATABASE_URL = normalize_database_url(DatabaseSettings().url)
 
 RUNTIME_METADATA_KEYS = {
     'generation_duration_seconds',
@@ -257,8 +255,8 @@ def main() -> None:
         (OUTPUT / f'baseline_evaluation_{horizon}m.json').write_text(json.dumps(baselines[str(horizon)], indent=2, sort_keys=True) + '\n', encoding='utf-8')
     (OUTPUT / 'leakage_audit.json').write_text(json.dumps({'status': 'PASS', 'horizons': leakage}, indent=2, sort_keys=True) + '\n', encoding='utf-8')
 
-    pytest_result = subprocess.run(['py', '-3', '-m', 'pytest', '-q'], capture_output=True, text=True, check=False)
-    ruff_result = subprocess.run(['py', '-3', '-m', 'ruff', 'check', '.'], capture_output=True, text=True, check=False)
+    pytest_result = subprocess.run([sys.executable, '-m', 'pytest', '-q'], cwd=ROOT, capture_output=True, text=True, check=False)
+    ruff_result = subprocess.run([sys.executable, '-m', 'ruff', 'check', 'src', 'tests'], cwd=ROOT, capture_output=True, text=True, check=False)
     tests_status = 'PASS' if pytest_result.returncode == 0 else 'BLOCKED'
     lint_status = 'PASS' if ruff_result.returncode == 0 else 'BLOCKED'
 
@@ -282,7 +280,7 @@ def main() -> None:
         },
         'tests': {
             'status': tests_status,
-            'command': 'py -3 -m pytest -q',
+            'command': 'python -m pytest -q',
             'exit_code': pytest_result.returncode,
             'stdout_tail': pytest_result.stdout.strip().splitlines()[-5:],
             'stderr_tail': pytest_result.stderr.strip().splitlines()[-5:],
@@ -290,7 +288,7 @@ def main() -> None:
         },
         'lint': {
             'status': lint_status,
-            'command': 'py -3 -m ruff check .',
+            'command': 'python -m ruff check src tests',
             'exit_code': ruff_result.returncode,
             'stdout_tail': ruff_result.stdout.strip().splitlines()[-5:],
             'stderr_tail': ruff_result.stderr.strip().splitlines()[-5:],
@@ -310,14 +308,14 @@ def main() -> None:
         'qa': {
             'pytest': {
                 'status': tests_status,
-                'command': 'py -3 -m pytest -q',
+                'command': 'python -m pytest -q',
                 'exit_code': pytest_result.returncode,
                 'stdout': pytest_result.stdout,
                 'stderr': pytest_result.stderr,
             },
             'ruff': {
                 'status': lint_status,
-                'command': 'py -3 -m ruff check .',
+                'command': 'python -m ruff check src tests',
                 'exit_code': ruff_result.returncode,
                 'stdout': ruff_result.stdout,
                 'stderr': ruff_result.stderr,

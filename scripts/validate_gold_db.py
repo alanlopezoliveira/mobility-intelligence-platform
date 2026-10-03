@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import sys
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -10,9 +11,14 @@ from pathlib import Path
 import psycopg
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 GOLD_PATH = ROOT / 'data' / 'gold' / 'station_demand_hourly.csv'
 REPORT_PATH = ROOT / 'data' / 'gold' / 'gold_postgresql_equality.json'
-DATABASE_URL = 'postgresql://mobility_user:change_me@db:5432/mobility'
+from src.config.settings import DatabaseSettings, normalize_database_url
+
+DATABASE_URL = normalize_database_url(DatabaseSettings().url)
 SOURCE_NAME = 'bicimad_historical_trips'
 FIELDS = ('departures', 'arrivals', 'total_activity', 'net_flow', 'demand')
 
